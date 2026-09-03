@@ -27,7 +27,313 @@ import {
   Users,
   Wrench,
   Menu,
+  Trash2,
+  RotateCcw,
+  Eye,
+  Download,
+  QrCode,
+  Barcode,
 } from "lucide-react";
+import initialAppData from "./data/appData.json";
+import QRCode from "qrcode";
+import JsBarcode from "jsbarcode";
+
+function qrUrl(text, size = 160) {
+  try {
+    return QRCode.toDataURL(String(text).slice(0, 500), {
+      width: size,
+      margin: 1,
+      color: { dark: "#14181F", light: "#FFFFFF" },
+    });
+  } catch (e) {
+    return Promise.resolve("");
+  }
+}
+function QrImg({ text, size = 100 }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => {
+    let live = true;
+    qrUrl(text, size).then((u) => live && setSrc(u));
+    return () => (live = false);
+  }, [text, size]);
+  return src ? (
+    <img src={src} alt="QR" width={size} height={size} />
+  ) : (
+    <div
+      style={{ width: size, height: size, border: `1px dashed ${c.border}` }}
+      className="flex items-center justify-center text-[10px]"
+    >
+      <span style={{ color: c.faint }}>QR</span>
+    </div>
+  );
+}
+
+const SCAN_STATE = { IDLE: 0, RUNNING: 1, ERROR: 2 };function BarcodeView({ value, height = 60, width = 220, filename }) {
+  const [svgUrl, setSvgUrl] = useState("");
+  const buildSvg = () => {
+    try {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      JsBarcode(svg, String(value), {
+        format: "CODE128",
+        displayValue: true,
+        height,
+        width: 2,
+        margin: 4,
+        fontSize: 14,
+      });
+      const str = new XMLSerializer().serializeToString(svg);
+      const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(str);
+      setSvgUrl(url);
+      return str;
+    } catch (e) {
+      return "";
+    }
+  };
+
+  useEffect(() => {
+    buildSvg();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, height]);
+
+  const downloadPng = () => {
+    const str = buildSvg();
+    if (!str) return;
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = Math.round((width / img.width) * img.height) || img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const a = document.createElement("a");
+      a.href = canvas.toDataURL("image/png");
+      a.download = `${filename || "barcode"}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(str);
+  };
+
+  return (
+    <div className="inline-flex flex-col items-center gap-1">
+      {svgUrl ? (
+        <img src={svgUrl} alt="barcode" width={width} style={{ background: "#fff" }} />
+      ) : (
+        <div
+          style={{ width, height, border: `1px dashed ${c.border}` }}
+          className="flex items-center justify-center text-[10px]"
+        >
+          <span style={{ color: c.faint }}>Barcode</span>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={downloadPng}
+        style={{ color: c.primary }}
+        className="text-xs font-medium hover:underline flex items-center gap-1"
+        title="Download PNG"
+      >
+        <Download size={14} /> Download
+      </button>
+    </div>
+  );
+}
+
+function canScan() {
+  return typeof window !== "undefined" && "BarcodeDetector" in window;
+}
+function useScanner() {
+  const [open, setOpen] = useState(false);
+  const [state, setState] = useState(SCAN_STATE.IDLE);
+  const [error, setError] = useState("");
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const detectorRef = useRef(null);
+  const cbRef = useRef(null);
+  const rafRef = useRef(null);
+
+  const stop = () => {
+    try {
+      streamRef.current &&
+        streamRef.current.getTracks().forEach((t) => t.stop());
+    } catch (e) {}
+    streamRef.current = null;
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    setState(SCAN_STATE.IDLE);
+  };
+
+  const openScanner = (onScan) => {
+    if (!canScan()) {
+      setError(
+        "QR scanner not supported in this browser. Use Chrome/Edge (desktop) with a camera, or Chrome on Android.",
+      );
+      setOpen(true);
+      setState(SCAN_STATE.ERROR);
+      return;
+    }
+    cbRef.current = onScan;
+    setOpen(true);
+    setState(SCAN_STATE.RUNNING);
+  };
+
+  const buildDetector = async () => {
+    try {
+      const fmt = ["qr_code"];
+      detectorRef.current = new BarcodeDetector({ formats: fmt });
+      return true;
+    } catch (e) {
+      try {
+        detectorRef.current = new BarcodeDetector();
+        return true;
+      } catch (e2) {
+        return false;
+      }
+    }
+  };
+
+  const tick = async () => {
+    if (!videoRef.current) return;
+    if (videoRef.current.readyState >= 2 && detectorRef.current) {
+      try {
+        const codes = await detectorRef.current.detect(videoRef.current);
+        if (codes && codes.length && codes[0].rawValue) {
+          const text = String(codes[0].rawValue).trim();
+          stop();
+          setOpen(false);
+          if (cbRef.current) cbRef.current(text);
+          return;
+        }
+      } catch (e) {}
+    }
+    rafRef.current = requestAnimationFrame(tick);
+  };
+
+  useEffect(() => {
+    if (!open || state !== SCAN_STATE.RUNNING) return;
+    let cancelled = false;
+    (async () => {
+      const ok = await buildDetector();
+      if (cancelled) return;
+      if (!ok) {
+        setState(SCAN_STATE.ERROR);
+        setError("Could not initialize the QR detector in this browser.");
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      } catch (e) {
+        if (cancelled) return;
+        setState(SCAN_STATE.ERROR);
+        setError("Camera access denied or unavailable. Allow camera permission and retry.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, state]);
+
+  const modal = open ? (
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
+      onClick={() => {
+        stop();
+        setOpen(false);
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: "#0F1218", border: "1px solid #2A3040" }}
+        className="w-full max-w-sm rounded-xl overflow-hidden shadow-2xl"
+      >
+        <div className="flex items-center justify-between px-4 py-3">
+          <span style={{ color: "#E5E7EB" }} className="text-sm font-semibold">
+            Scan QR Code
+          </span>
+          <button
+            onClick={() => {
+              stop();
+              setOpen(false);
+            }}
+            className="text-gray-400 hover:text-white p-1 rounded"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="px-4 pb-4">
+          {state === SCAN_STATE.RUNNING ? (
+            <div className="relative rounded-lg overflow-hidden bg-black">
+              <video
+                ref={videoRef}
+                playsInline
+                muted
+                style={{ width: "100%", height: 220, objectFit: "cover" }}
+              />
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div
+                  style={{ boxShadow: "0 0 0 2000px rgba(0,0,0,0.35)" }}
+                  className="w-52 h-16 rounded-sm border-2 border-white/80"
+                />
+              </div>
+              <div className="absolute bottom-2 left-0 right-0 text-center text-xs text-white/80 tracking-wide">
+                Point camera at a QR code…
+              </div>
+            </div>
+          ) : (
+            <div className="py-8 text-center">
+              <Camera size={28} style={{ color: "#EF4444" }} className="mx-auto mb-3" />
+              <p style={{ color: "#E5E7EB" }} className="text-sm px-4">
+                {error}
+              </p>
+              <button
+                onClick={() => setState(SCAN_STATE.RUNNING)}
+                className="mt-4 px-4 py-2 rounded-md text-sm font-semibold text-white bg-blue-600 hover:bg-blue-500"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  return { openScanner, modal };
+}
+
+function ScanInput({ value, onValue, size = 16, title = "Scan QR with camera", allowSet = true }) {
+  const { openScanner, modal } = useScanner();
+  return (
+    <span className="inline-flex items-center">
+      <button
+        type="button"
+        onClick={() => openScanner((text) => allowSet && onValue(text))}
+        title={title}
+        className="p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-700 transition-colors"
+      >
+        <Camera size={size} />
+      </button>
+      {modal}
+    </span>
+  );
+}
 
 const c = {
   ink: "#14181F",
@@ -56,6 +362,7 @@ const FLOW_COLORS = {
 };
 
 const INWARD_STAGES = [
+  "Pre Gate Inward",
   "Gate Inward",
   "Inward",
   "Checklist Unloading",
@@ -74,7 +381,7 @@ const OUTWARD_STAGES = [
 function getStepDocNo(baseId, tone, stageIndex) {
   if (!baseId) return "";
   if (tone === "inward") {
-    const prefixes = ["GT-IN", "IN", "CL-IN", "QC-IN", "GRN"];
+    const prefixes = ["PR", "GT", "IN", "CL", "QC", "GRN"];
     return `${prefixes[stageIndex] || "DOC"}-${baseId}`;
   } else if (tone === "outward") {
     const prefixes = ["PK-LST", "PK", "QC-OUT", "CL-LD", "DSP", "OUT-DSP"];
@@ -83,7 +390,62 @@ function getStepDocNo(baseId, tone, stageIndex) {
   return `DOC-${baseId}`;
 }
 
+// Prefix used by a stage in the hierarchy (1-indexed via stage index).
+const IN_PREFIXES = ["PR", "GT", "IN", "CL", "QC", "GRN"];
+const OUT_PREFIXES = ["PK-LST", "PK", "QC-OUT", "CL-LD", "DSP", "OUT-DSP"];
+
+// Build a child's short document ID: {prefix}-{uniqueNumber}. The tree link is
+// kept separately via parentId/rootId, NOT embedded in the ID.
+function childHierarchyId(childPrefix, uniqueNumber) {
+  return `${childPrefix}-${uniqueNumber}`;
+}
+
+// Stage type keys inside appData match these lists (1-indexed)
+const IN_TYPE_KEYS = ["preGateInward", "gateInward", "inward", "checklistUnloading", "qualityCheck", "goodReceiptNote"];
+const OUT_TYPE_KEYS = ["pickList", "pick", "qualityCheckOutward", "checklistLoading", "dispatch", "outward"];
+
+// 1-indexed stage metadata (key + label + display name) for deriving rows from consignments
+const IN_STAGE_META = [
+  { key: "preGateInward", label: "Pre Gate Inward" },
+  { key: "gateInward", label: "Gate Inward" },
+  { key: "inward", label: "Inward" },
+  { key: "checklistUnloading", label: "Checklist Unloading" },
+  { key: "qualityCheck", label: "Quality Check" },
+  { key: "goodReceiptNote", label: "Good Receipt Note" },
+];
+const OUT_STAGE_META = [
+  { key: "pickList", label: "Pick List" },
+  { key: "pick", label: "Pick" },
+  { key: "qualityCheckOutward", label: "Quality Check Outward" },
+  { key: "checklistLoading", label: "Checklist Loading" },
+  { key: "dispatch", label: "Dispatch" },
+  { key: "outward", label: "Outward" },
+];
+
+function primaryForStep(step) {
+  // Simple deterministic tone for the current step of a consignment
+  const tones = ["primary", "warning", "danger", "muted"];
+  return tones[(step - 1) % tones.length];
+}
+
 const STAGE_FIELDS = {
+  "Pre Gate Inward": [
+    {
+      key: "customer",
+      label: "Customer Name",
+      placeholder: "e.g. Nimbus Retail Pvt Ltd",
+    },
+    {
+      key: "vendor",
+      label: "Vendor / Consignor",
+      placeholder: "e.g. Aravali Foods Ltd.",
+    },
+    {
+      key: "expectedDate",
+      label: "Expected Arrival Date",
+      placeholder: "e.g. 2026-09-05",
+    },
+  ],
   "Gate Inward": [
     {
       key: "vehicleNo",
@@ -342,6 +704,7 @@ const NAV = [
   },
   { id: "attendance", label: "Attendance & MHE", icon: Users },
   { id: "tracktrace", label: "Track & Trace", icon: Radar },
+  { id: "recyclebin", label: "Recycle Bin", icon: Trash2 },
 ];
 
 const PAGE_TITLES = {
@@ -358,6 +721,7 @@ const PAGE_TITLES = {
   "fin-payments": ["Finance", "Payments"],
   attendance: ["Operations", "Attendance & MHE Log"],
   tracktrace: ["Track & Trace", null],
+  recyclebin: ["Recycle Bin", null],
 };
 
 function genBaseDoc() {
@@ -383,7 +747,7 @@ function Pill({ tone = "muted", children }) {
   );
 }
 
-function StatCard({ label, value, sub, tone = "primary" }) {
+function StatCard({ label, value, sub, tone = "primary", tooltip = [] }) {
   const tones = {
     primary: c.primary,
     warning: c.warning,
@@ -391,59 +755,98 @@ function StatCard({ label, value, sub, tone = "primary" }) {
     danger: c.danger,
   };
   return (
-    <div
-      style={{ background: c.card, border: `1px solid ${c.border}` }}
-      className="rounded-md p-4 sm:p-5 flex flex-col gap-2"
-    >
-      <span style={{ color: c.muted }} className="text-xs sm:text-sm">
-        {label}
-      </span>
-      <span
-        style={{ color: c.text }}
-        className="text-2xl sm:text-3xl font-semibold"
+    <div className="relative group">
+      <div
+        style={{ background: c.card, border: `1px solid ${c.border}` }}
+        className="rounded-md p-4 sm:p-5 flex flex-col gap-2"
       >
-        {value}
-      </span>
-      <div className="flex items-center gap-2">
-        <div
-          style={{ background: c.surface }}
-          className="h-1.5 flex-1 rounded-full overflow-hidden"
-        >
-          <div
-            style={{ background: tones[tone], width: sub.pct + "%" }}
-            className="h-full rounded-full"
-          />
-        </div>
-        <span
-          style={{ color: c.faint }}
-          className="text-[11px] sm:text-xs font-medium"
-        >
-          {sub.text}
+        <span style={{ color: c.muted }} className="text-xs sm:text-sm">
+          {label}
         </span>
+        <span
+          style={{ color: c.text }}
+          className="text-2xl sm:text-3xl font-semibold"
+        >
+          {value}
+        </span>
+        <div className="flex items-center gap-2">
+          <div
+            style={{ background: c.surface }}
+            className="h-1.5 flex-1 rounded-full overflow-hidden"
+          >
+            <div
+              style={{ background: tones[tone], width: sub.pct + "%" }}
+              className="h-full rounded-full"
+            />
+          </div>
+          <span
+            style={{ color: c.faint }}
+            className="text-[11px] sm:text-xs font-medium"
+          >
+            {sub.text}
+          </span>
+        </div>
       </div>
+      {tooltip.length > 0 && (
+        <div
+          style={{
+            background: "#1F2937",
+            color: "#F9FAFB",
+            border: "1px solid #374151",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+          }}
+          className="absolute z-30 hidden group-hover:block w-56 pointer-events-none rounded-lg p-3 text-xs translate-x-0 -translate-y-full mt-0 left-0 top-0 -ml-1"
+        >
+          <div className="font-semibold mb-2">{label} — details</div>
+          <div className="flex flex-col gap-1.5">
+            {tooltip.map(([k, v, color]) => (
+              <div
+                key={k}
+                className="flex items-center justify-between gap-2"
+              >
+                <span className="flex items-center gap-1.5 capitalize">
+                  <span
+                    style={{ background: color, display: "inline-block" }}
+                    className="w-2.5 h-2.5 rounded-sm"
+                  />
+                  {k}
+                </span>
+                <span className="font-semibold">{v}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function BinMap() {
-  const cols = 40;
-  const rows = 12;
-  const cells = useMemo(() => {
-    const arr = [];
-    for (let i = 0; i < cols * rows; i++) {
-      const r = Math.random();
-      if (r < 0.58) arr.push("occupied");
-      else if (r < 0.82) arr.push("empty");
-      else if (r < 0.94) arr.push("hold");
-      else arr.push("blocked");
-    }
-    return arr;
-  }, []);
+
+function BinMap({ bins }) {
+  const { cols, rows, cells } = bins;
   const colorFor = {
-    occupied: c.primary,
-    empty: c.border,
-    hold: c.warning,
-    blocked: c.danger,
+    expired: "#000000", // black
+    "near expiry": "#D23C3C", // red (danger)
+    fresh: "#188A5A", // green (success)
+    "non expiring": "#2F6FED", // blue (primary)
+    empty: "#E3E7EC", // grey (border)
+  };
+  const getColor = (entry) =>
+    (entry && entry.status && colorFor[entry.status]) ||
+    (typeof entry === "string" && colorFor[entry]) ||
+    colorFor.empty;
+  const [tip, setTip] = useState(null); // { bin, productId, productName, status, category, expiryDate, x, y }
+  const showTip = (entry, i, e) => {
+    setTip({
+      bin: String(i + 1).padStart(2, "0"),
+      productId: entry && entry.productId,
+      productName: entry && entry.productName,
+      status: entry && entry.status ? entry.status : "empty",
+      category: entry && entry.category,
+      expiryDate: entry && entry.expiryDate,
+      x: e.clientX,
+      y: e.clientY,
+    });
   };
   return (
     <div
@@ -459,7 +862,7 @@ function BinMap() {
             Bin utilization
           </h3>
           <p style={{ color: c.muted }} className="text-xs sm:text-sm">
-            Sample view across zones A–D · 10,000 bins total
+            Sample view across zones A–D · {cols * rows} bins total
           </p>
         </div>
         <div
@@ -467,10 +870,11 @@ function BinMap() {
           style={{ color: c.muted }}
         >
           {[
-            ["occupied", "Occupied"],
+            ["expired", "Expired"],
+            ["near expiry", "Near Expiry"],
+            ["fresh", "Fresh"],
+            ["non expiring", "Non‑expiring"],
             ["empty", "Empty"],
-            ["hold", "QC hold"],
-            ["blocked", "Blocked"],
           ].map(([k, l]) => (
             <span key={k} className="flex items-center gap-1">
               <span
@@ -489,17 +893,73 @@ function BinMap() {
           gap: 2,
         }}
       >
-        {cells.map((s, i) => (
+        {cells.map((entry, i) => (
           <div
             key={i}
+            onMouseMove={(e) => showTip(entry, i, e)}
+            onMouseLeave={() => setTip(null)}
             style={{
-              background: colorFor[s],
+              background: getColor(entry),
               aspectRatio: "1 / 1",
               borderRadius: 1,
+              cursor: "pointer",
             }}
           />
         ))}
       </div>
+
+      {tip && (
+        <div
+          className="pointer-events-none rounded-lg p-3 text-xs"
+          style={{
+            position: "fixed",
+            left: tip.x + 14,
+            top: tip.y + 14,
+            background: "#1F2937",
+            color: "#F9FAFB",
+            border: "1px solid #374151",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.3)",
+            zIndex: 9999,
+            maxWidth: 240,
+          }}
+        >
+          <div className="font-semibold mb-1">Bin {tip.bin}</div>
+          {tip.productName ? (
+            <>
+              <div className="text-[13px]">{tip.productName}</div>
+              <div style={{ color: "#D1D5DB" }} className="mt-0.5">
+                {tip.productId} · {tip.category || "—"}
+              </div>
+              <div style={{ color: "#D1D5DB" }} className="mt-0.5">
+                Expiry:{" "}
+                {!tip.expiryDate || tip.expiryDate === "none"
+                  ? "Non-expiring"
+                  : tip.expiryDate}
+              </div>
+              <div
+                className="mt-1 inline-block px-1.5 py-0.5 rounded-sm text-[10px] font-semibold uppercase"
+                style={{
+                  background:
+                    tip.status === "empty"
+                      ? "#4B5563"
+                      : tip.status === "expired"
+                        ? "#000000"
+                        : tip.status === "near expiry"
+                          ? "#DC2626"
+                          : tip.status === "fresh"
+                            ? "#16A34A"
+                            : "#2563EB",
+                  color: "#fff",
+                }}
+              >
+                {tip.status}
+              </div>
+            </>
+          ) : (
+            <div style={{ color: "#D1D5DB" }}>Empty · slot freed by dispatch</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -551,57 +1011,57 @@ function Pipeline({ title, stages }) {
   );
 }
 
-function ActivityTable({ searchQuery = "" }) {
-  const rows = [
-    {
-      doc: "GRN-3021",
-      party: "Nimbus Retail Pvt Ltd",
-      type: "Inward",
-      stage: "Good Receipt Note",
-      status: "success",
-      time: "10:42 AM",
-    },
-    {
-      doc: "GT-IN-1187",
-      party: "Aravali Foods",
-      type: "Inward",
-      stage: "Gate Inward",
-      status: "muted",
-      time: "10:15 AM",
-    },
-    {
-      doc: "OUT-DSP-552",
-      party: "Kalash Distributors",
-      type: "Outward",
-      stage: "Dispatch",
-      status: "success",
-      time: "9:58 AM",
-    },
-    {
-      doc: "QC-IN-0912",
-      party: "Meridian Textiles",
-      type: "Inward",
-      stage: "Quality Check",
-      status: "warning",
-      time: "9:40 AM",
-    },
-    {
-      doc: "PK-2209",
-      party: "Orbit Hardware",
-      type: "Outward",
-      stage: "Pick",
-      status: "primary",
-      time: "9:21 AM",
-    },
-    {
-      doc: "QC-OUT-0447",
-      party: "Silverline Pharma",
-      type: "Outward",
-      stage: "Quality Check Outward",
-      status: "danger",
-      time: "8:55 AM",
-    },
-  ];
+function ActivityTable({ searchQuery = "", inward = [], outward = [], inwardConsignments = [], outwardConsignments = [] }) {
+  const rows = useMemo(() => {
+    const result = [];
+    const flows = [
+      {
+        records: inward,
+        consignments: inwardConsignments,
+        typeLabel: "Inward",
+        meta: IN_STAGE_META,
+        toneMap: { success: "success", warning: "warning", muted: "muted" },
+      },
+      {
+        records: outward,
+        consignments: outwardConsignments,
+        typeLabel: "Outward",
+        meta: OUT_STAGE_META,
+        toneMap: { success: "success", warning: "warning", muted: "muted" },
+      },
+    ];
+    flows.forEach((flow) => {
+      // For each consignment, use its current (latest reached) stage record
+      flow.consignments.forEach((c) => {
+        const stageRecords = flow.records.filter(
+          (r) => r.commonNumber === c.commonNumber,
+        );
+        const completed = stageRecords.filter((r) => r.status === "completed");
+        let current = null;
+        if (c.currentStage && c.currentStage <= flow.meta.length) {
+          current =
+            stageRecords.find(
+              (r) => r.type === flow.meta[c.currentStage - 1].key,
+            ) || completed[completed.length - 1] || null;
+        }
+        if (!current) current = completed[completed.length - 1] || null;
+        if (!current) current = stageRecords[0] || null;
+        if (!current) return;
+        const meta = flow.meta.find((m) => m.key === current.type);
+        result.push({
+          doc: current.id,
+          party: c.customer,
+          type: flow.typeLabel,
+          stage: meta ? meta.label : current.type,
+          status: current.status === "completed" ? "success" : "warning",
+          time: current.createdAt || "",
+        });
+      });
+    });
+    // Sort by created date (approx, descending) and cap to keep the table tidy
+    result.sort((a, b) => (b.time < a.time ? -1 : a.time < b.time ? 1 : 0));
+    return result.slice(0, 12);
+  }, [inward, inwardConsignments, outward, outwardConsignments]);
 
   const filteredRows = useMemo(() => {
     if (!searchQuery.trim()) return rows;
@@ -690,6 +1150,62 @@ function ActivityTable({ searchQuery = "" }) {
   );
 }
 
+function Pager({ total, page, setPage, pageSize, setPageSize }) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, pages);
+  useEffect(() => {
+    if (safePage !== page) setPage(safePage);
+  }, [safePage, page, setPage]);
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <span style={{ color: c.muted }} className="hidden sm:inline">
+        {total} {total === 1 ? "item" : "items"}
+      </span>
+      <select
+        value={pageSize}
+        onChange={(e) => {
+          setPageSize(Number(e.target.value));
+          setPage(1);
+        }}
+        style={{ borderColor: c.border, color: c.text, background: c.card }}
+        className="px-2 py-1 rounded-md border text-xs outline-none"
+        title="Rows per page"
+      >
+        {[10, 25, 50, 100].map((n) => (
+          <option key={n} value={n}>
+            {n}
+          </option>
+        ))}
+      </select>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          disabled={safePage <= 1}
+          onClick={() => setPage(safePage - 1)}
+          style={{ borderColor: c.border, color: safePage <= 1 ? c.faint : c.text }}
+          className="px-1.5 py-1 rounded-md border bg-white disabled:opacity-40"
+          title="Previous page"
+        >
+          <ChevronLeft size={13} />
+        </button>
+        <span style={{ color: c.muted }} className="px-1 whitespace-nowrap">
+          {safePage} / {pages}
+        </span>
+        <button
+          type="button"
+          disabled={safePage >= pages}
+          onClick={() => setPage(safePage + 1)}
+          style={{ borderColor: c.border, color: safePage >= pages ? c.faint : c.text }}
+          className="px-1.5 py-1 rounded-md border bg-white disabled:opacity-40"
+          title="Next page"
+        >
+          <ChevronRight size={13} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CrudPage({
   title,
   note,
@@ -698,19 +1214,86 @@ function CrudPage({
   rows,
   onAdd,
   onEdit,
+  onDelete,
+  reservedKeys = [],
   globalSearch = "",
+  qrIndex = -1,
 }) {
-  const [localSearch, setLocalSearch] = useState("");
+  const [error, setError] = useState("");
 
-  const activeSearch = localSearch || globalSearch;
+  const [qrFor, setQrFor] = useState(null);
+  const [barcodeFor, setBarcodeFor] = useState(null);
+  const [modal, setModal] = useState(null); // { mode: 'add'|'edit', index: number|null, values: string[] }
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
 
-  const filteredRows = useMemo(() => {
-    if (!activeSearch.trim()) return rows;
+  const activeSearch = globalSearch;
+
+  const filterRows = (list) => {
+    if (!activeSearch.trim()) return list;
     const q = activeSearch.toLowerCase();
-    return rows.filter((row) =>
+    return list.filter((row) =>
       row.some((cell) => String(cell).toLowerCase().includes(q)),
     );
-  }, [rows, activeSearch]);
+  };
+
+  const filteredRows = useMemo(() => filterRows(rows || []), [rows, activeSearch]);
+  useEffect(() => {
+    setPage(1);
+  }, [activeSearch, pageSize, rows]);
+  const pagedRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
+
+  // First column is treated as the unique key (code / id / name).
+  // A key is considered taken if it exists in the live list OR is reserved
+  // (i.e. sitting in the Recycle Bin and not yet permanently deleted).
+  const findDuplicate = (candidate, excludeIndex) => {
+    const c = String(candidate).toLowerCase();
+    const inList = (rows || []).some(
+      (row, i) => i !== excludeIndex && String(row[0]).toLowerCase() === c,
+    );
+    const inTrash = reservedKeys.some(
+      (k) => String(k).toLowerCase() === c,
+    );
+    return inList || inTrash;
+  };
+
+  const reserveError = (candidate) =>
+    reservedKeys.some(
+      (k) => String(k).toLowerCase() === String(candidate).toLowerCase(),
+    );
+
+  const openAdd = () => {
+    setError("");
+    setModal({ mode: "add", index: null, values: columns.map(() => "") });
+  };
+
+  const openEdit = (row, index) => {
+    setError("");
+    setModal({ mode: "edit", index, values: [...row] });
+  };
+
+  const validateAndSave = () => {
+    const trimmed = modal.values.map((v) => (v == null ? "" : String(v).trim()));
+    if (trimmed[0] === "") {
+      setError(`Please enter a ${columns[0].toLowerCase()}.`);
+      return;
+    }
+    if (findDuplicate(trimmed[0], modal.index)) {
+      if (reserveError(trimmed[0])) {
+        setError(`"${trimmed[0]}" is in the Recycle Bin and cannot be reused until permanently deleted.`);
+      } else {
+        setError(`Duplicate ${columns[0].toLowerCase()} "${trimmed[0]}" already exists.`);
+      }
+      return;
+    }
+    if (modal.mode === "edit") {
+      if (onEdit) onEdit(trimmed, modal.index);
+    } else {
+      if (onAdd) onAdd(trimmed);
+    }
+    setModal(null);
+    setError("");
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -732,7 +1315,7 @@ function CrudPage({
           )}
         </div>
         <button
-          onClick={onAdd}
+          onClick={openAdd}
           style={{ background: c.primary }}
           className="text-white px-3.5 py-1.5 sm:px-4 sm:py-2 rounded-md text-xs sm:text-sm font-medium flex items-center gap-1.5 hover:opacity-90"
         >
@@ -743,28 +1326,14 @@ function CrudPage({
         style={{ background: c.card, border: `1px solid ${c.border}` }}
         className="rounded-md p-3 sm:p-4"
       >
-        <div className="relative mb-4 max-w-xs">
-          <Search
-            size={16}
-            style={{ color: c.faint }}
-            className="absolute left-3 top-1/2 -translate-y-1/2"
+        <div className="flex justify-end mb-4">
+          <Pager
+            total={filteredRows.length}
+            page={page}
+            setPage={setPage}
+            pageSize={pageSize}
+            setPageSize={setPageSize}
           />
-          <input
-            type="text"
-            placeholder="Search this list..."
-            value={localSearch}
-            onChange={(e) => setLocalSearch(e.target.value)}
-            style={{ borderColor: c.border, color: c.text }}
-            className="w-full pl-9 pr-3 py-1.5 sm:py-2 rounded-md border text-xs sm:text-sm outline-none focus:ring-2"
-          />
-          {localSearch && (
-            <button
-              onClick={() => setLocalSearch("")}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400 hover:text-gray-600"
-            >
-              ✕
-            </button>
-          )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-xs sm:text-sm border-collapse min-w-[600px]">
@@ -779,38 +1348,65 @@ function CrudPage({
               </tr>
             </thead>
             <tbody>
-              {filteredRows.length > 0 ? (
-                filteredRows.map((row, i) => (
-                  <tr key={i} style={{ borderTop: `1px solid ${c.border}` }}>
-                    {row.map((cell, j) => (
-                      <td
-                        key={j}
-                        className="py-3 pr-4"
-                        style={{
-                          color: j === 0 ? c.text : c.muted,
-                          fontWeight: j === 0 ? 600 : 400,
-                        }}
-                      >
-                        {cell}
+              {pagedRows.length > 0 ? (
+                pagedRows.map((row, i) => {
+                  const realIndex = (rows || []).indexOf(row);
+                  return (
+                    <tr
+                      key={i}
+                      style={{ borderTop: `1px solid ${c.border}` }}
+                    >
+                      {row.map((cell, j) => (
+                        <td
+                          key={j}
+                          className="py-3 pr-4"
+                          style={{
+                            color: j === 0 ? c.text : c.muted,
+                            fontWeight: j === 0 ? 600 : 400,
+                          }}
+                        >
+                          {cell}
+                        </td>
+                      ))}
+                      <td className="py-3">
+                        {qrIndex >= 0 && (
+                          <button
+                            onClick={() => setQrFor(row[qrIndex])}
+                            style={{ color: c.primary }}
+                            className="inline-flex items-center gap-1 text-xs sm:text-sm font-medium hover:underline mr-3"
+                            title={`QR for ${row[qrIndex]}`}
+                          >
+                            QR
+                          </button>
+                        )}
+                        {qrIndex >= 0 && (
+                          <button
+                            onClick={() => setBarcodeFor(row[qrIndex])}
+                            style={{ color: c.primary }}
+                            className="inline-flex items-center gap-1 text-xs sm:text-sm font-medium hover:underline mr-3"
+                            title={`Barcode for ${row[qrIndex]}`}
+                          >
+                            Barcode
+                          </button>
+                        )}
+                        <button
+                          onClick={() => openEdit(row, realIndex)}
+                          style={{ color: c.primary }}
+                          className="text-xs sm:text-sm font-medium hover:underline mr-3"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => onDelete && onDelete(realIndex)}
+                          style={{ color: c.danger }}
+                          className="text-xs sm:text-sm font-medium hover:underline"
+                        >
+                          Delete
+                        </button>
                       </td>
-                    ))}
-                    <td className="py-3">
-                      <button
-                        onClick={() => onEdit(row)}
-                        style={{ color: c.primary }}
-                        className="text-xs sm:text-sm font-medium hover:underline mr-3"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        style={{ color: c.danger }}
-                        className="text-xs sm:text-sm font-medium hover:underline"
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                ))
+                    </tr>
+                  );
+                })
               ) : (
                 <tr>
                   <td
@@ -826,11 +1422,450 @@ function CrudPage({
           </table>
         </div>
       </div>
+
+      {modal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: c.card, border: `1px solid ${c.border}` }}
+            className="w-full max-w-md rounded-lg overflow-hidden shadow-2xl"
+          >
+            <div
+              className="px-4 py-3 flex items-center justify-between"
+              style={{ borderBottom: `1px solid ${c.border}`, background: c.surface }}
+            >
+              <h4 style={{ color: c.text }} className="text-sm font-semibold">
+                {modal.mode === "add" ? `New ${title.replace(/s$/, "")}` : `Edit ${title.replace(/s$/, "")}`}
+              </h4>
+              <button
+                onClick={() => setModal(null)}
+                style={{ color: c.faint }}
+                className="p-1 rounded hover:bg-gray-200"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-4 flex flex-col gap-3">
+              {modal.values.map((value, idx) => (
+                <div key={idx} className="flex flex-col gap-1">
+                  <label
+                    style={{ color: c.muted }}
+                    className="text-xs font-medium"
+                  >
+                    {columns[idx]}
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={value}
+                      onChange={(e) =>
+                        setModal({
+                          ...modal,
+                          values: modal.values.map((v, vi) =>
+                            vi === idx ? e.target.value : v,
+                          ),
+                        })
+                      }
+                      placeholder={`Enter ${columns[idx].toLowerCase()}`}
+                      style={{ borderColor: c.border, color: c.text }}
+                      className="flex-1 px-3 py-2 rounded-md border text-sm outline-none focus:ring-2"
+                    />
+                    <ScanInput
+                      value={value}
+                      onValue={(t) =>
+                        setModal({
+                          ...modal,
+                          values: modal.values.map((v, vi) =>
+                            vi === idx ? t : v,
+                          ),
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+              ))}
+              {error && (
+                <p style={{ color: c.danger }} className="text-xs font-medium">
+                  {error}
+                </p>
+              )}
+            </div>
+            <div
+              className="px-4 py-3 flex items-center justify-end gap-2"
+              style={{ borderTop: `1px solid ${c.border}` }}
+            >
+              <button
+                onClick={() => setModal(null)}
+                style={{ color: c.muted, borderColor: c.border }}
+                className="px-4 py-1.5 rounded-md border text-sm font-medium hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={validateAndSave}
+                style={{ background: c.primary }}
+                className="px-4 py-1.5 rounded-md text-sm font-medium text-white hover:opacity-90"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {qrFor !== null && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setQrFor(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: c.card, border: `1px solid ${c.border}` }}
+            className="rounded-lg overflow-hidden shadow-2xl"
+          >
+            <div
+              className="px-4 py-3 flex items-center justify-between gap-6"
+              style={{ borderBottom: `1px solid ${c.border}`, background: c.surface }}
+            >
+              <h4 style={{ color: c.text }} className="text-sm font-semibold">
+                Bin QR
+              </h4>
+              <button
+                onClick={() => setQrFor(null)}
+                style={{ color: c.faint }}
+                className="p-1 rounded hover:bg-gray-200"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-5 flex flex-col items-center gap-3">
+              <QrImg text={qrFor} size={140} />
+              <p style={{ color: c.muted }} className="text-sm font-medium">
+                {qrFor}
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => navigator.clipboard && navigator.clipboard.writeText(String(qrFor))}
+                  style={{ color: c.primary, borderColor: c.primary }}
+                  className="px-3 py-1.5 rounded-md border text-xs font-semibold hover:bg-blue-50"
+                >
+                  Copy code
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const url = await qrUrl(qrFor, 280);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `${String(qrFor).replace(/[^\w-]/g, "_")}-qr.png`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                  }}
+                  style={{ color: c.primary, borderColor: c.primary }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md border text-xs font-semibold hover:bg-blue-50"
+                >
+                  <Download size={13} /> Download PNG
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {barcodeFor !== null && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setBarcodeFor(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: c.card, border: `1px solid ${c.border}` }}
+            className="rounded-lg overflow-hidden shadow-2xl"
+          >
+            <div
+              className="px-4 py-3 flex items-center justify-between gap-6"
+              style={{ borderBottom: `1px solid ${c.border}`, background: c.surface }}
+            >
+              <h4 style={{ color: c.text }} className="text-sm font-semibold">
+                {title.replace(/s$/, "")} Barcode
+              </h4>
+              <button
+                onClick={() => setBarcodeFor(null)}
+                style={{ color: c.faint }}
+                className="p-1 rounded hover:bg-gray-200"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-5 flex flex-col items-center gap-3">
+              <BarcodeView
+                value={barcodeFor}
+                filename={String(barcodeFor).replace(/[^\w-]/g, "_")}
+              />
+              <p style={{ color: c.muted }} className="text-sm font-medium">
+                {barcodeFor}
+              </p>
+              <button
+                onClick={() => navigator.clipboard && navigator.clipboard.writeText(String(barcodeFor))}
+                style={{ color: c.primary, borderColor: c.primary }}
+                className="px-3 py-1.5 rounded-md border text-xs font-semibold hover:bg-blue-50"
+              >
+                Copy code
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function WorkflowRow({ r, stages, tone, onOpenRow, forcedStepIndex }) {
+function TreeRow({
+  node,
+  depth = 0,
+  stages,
+  tone,
+  onOpenRow,
+  onDeleteRow,
+  expandedSet,
+  onToggle,
+  forceOpen = false,
+  selectedStep,
+}) {
+  const hasChildren = !!node.children && node.children.length > 0;
+  const isExpanded = forceOpen || expandedSet.has(node.id);
+  const step = node.step;
+  const activeColor = tone === "inward" ? c.primary : "#7C3AED";
+  const isStageSelected = selectedStep !== undefined && selectedStep === step - 1;
+  const [labelOpen, setLabelOpen] = useState(null); // {type, value}
+  const labelValue = node.documentId || node.id || "";
+  const isInwardRecord = node.flow === "inward" && node.step === 3;
+  const qrPayload = [
+    labelValue,
+    node.productName ? `Product: ${node.productName}` : "",
+    node.productId ? `SKU: ${node.productId}` : "",
+    node.binRef ? `Bin: ${node.binRef}` : "",
+    node.party && node.party !== "—" ? `Party: ${node.party}` : "",
+    node.ref && node.ref !== "—" ? (node.flow === "inward" ? `Vehicle: ${node.ref}` : `Ref: ${node.ref}`) : "",
+    node.stageLabel ? `Stage: ${node.stageLabel}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const closeLabel = () => setLabelOpen(null);
+
+  return (
+    <React.Fragment>
+      <tr
+        className="border-t align-middle"
+        style={{
+          borderColor: c.border,
+          background: isExpanded
+            ? c.bg
+            : isStageSelected
+              ? `${activeColor}0F`
+              : undefined,
+          opacity: isExpanded ? 0.55 : 1,
+          boxShadow: isStageSelected ? `inset 3px 0 0 ${activeColor}` : undefined,
+        }}
+      >
+        <td
+          className="px-3 py-2.5 text-xs sm:text-sm"
+          style={{ color: c.text, paddingLeft: 12 + depth * 22 }}
+        >
+          <div className="flex items-center gap-1.5">
+            {hasChildren ? (
+              <button
+                onClick={() => onToggle(node.id)}
+                className="p-0.5 shrink-0"
+                style={{ color: c.muted }}
+                aria-label={isExpanded ? "Collapse" : "Expand"}
+              >
+                {isExpanded ? (
+                  <ChevronDown size={14} />
+                ) : (
+                  <ChevronRight size={14} />
+                )}
+              </button>
+            ) : (
+              <span className="w-4 shrink-0" />
+            )}
+            <span
+              className="font-medium"
+              style={{ color: c.primary }}
+            >
+              {node.documentId || node.id}
+            </span>
+          </div>
+        </td>
+        <td className="px-3 py-2.5 text-xs sm:text-sm" style={{ color: c.text }}>
+          {node.party || node.ref || "—"}
+        </td>
+        <td className="px-3 py-2.5 text-xs sm:text-sm" style={{ color: c.muted }}>
+          {node.ref || "—"}
+        </td>
+        <td className="px-3 py-2.5" style={{ color: c.text }}>
+          <span
+            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium"
+            style={{
+              background: c.soft,
+              color: step > 1 ? activeColor : c.primary,
+            }}
+          >
+            {node.stageLabel}
+          </span>
+        </td>
+        <td className="px-3 py-2.5 text-xs sm:text-sm" style={{ color: c.muted }}>
+          {node.flow === "inward" ? "Inward" : "Outward"}
+        </td>
+        <td className="px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <div
+              className="h-1.5 rounded-full overflow-hidden"
+              style={{ width: 70, background: c.soft }}
+            >
+              <div
+                style={{
+                  width: `${Math.max(8, Math.min(100, (step / Math.max(1, stages.length)) * 100))}%`,
+                  background: activeColor,
+                }}
+                className="h-full"
+              />
+            </div>
+            <span className="text-[11px]" style={{ color: c.muted }}>
+              {step}/{stages.length}
+            </span>
+          </div>
+        </td>
+        <td className="px-3 py-2.5">
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => onOpenRow(node)}
+              className="text-xs px-2 py-1 rounded flex items-center gap-1 hover:opacity-80"
+              style={{ color: activeColor, background: c.soft }}
+            >
+              <Eye size={13} /> Open
+            </button>
+            {onDeleteRow && (
+              <button
+                onClick={() => onDeleteRow(node)}
+                className="text-xs px-2 py-1 rounded flex items-center gap-1 hover:opacity-80"
+                style={{ color: "#DC2626", background: "rgba(220,38,38,0.1)" }}
+              >
+                <Trash2 size={13} /> Delete
+              </button>
+            )}
+            {isInwardRecord && (
+              <>
+                <button
+                  onClick={() => setLabelOpen({ type: "qr", value: qrPayload })}
+                  className="p-1.5 rounded hover:opacity-80"
+                  style={{ color: activeColor, background: c.soft }}
+                  title="View & download Inward QR"
+                >
+                  <QrCode size={13} />
+                </button>
+                <button
+                  onClick={() => setLabelOpen({ type: "barcode", value: labelValue })}
+                  className="p-1.5 rounded hover:opacity-80"
+                  style={{ color: activeColor, background: c.soft }}
+                  title="View & download barcode"
+                >
+                  <Barcode size={13} />
+                </button>
+              </>
+            )}
+          </div>
+        </td>
+      </tr>
+      {labelOpen && (
+        <tr>
+          <td colSpan={8}>
+            <div
+              className="fixed inset-0 z-[85] flex items-center justify-center bg-black/40 p-4"
+              onClick={closeLabel}
+            >
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{ background: c.card, border: `1px solid ${c.border}` }}
+                className="rounded-lg overflow-hidden shadow-2xl"
+              >
+                <div
+                  className="px-4 py-3 flex items-center justify-between gap-6"
+                  style={{ borderBottom: `1px solid ${c.border}`, background: c.surface }}
+                >
+                  <h4 style={{ color: c.text }} className="text-sm font-semibold">
+                    {labelOpen.type === "qr" ? "QR Code" : "Barcode"}
+                  </h4>
+                  <button
+                    onClick={closeLabel}
+                    style={{ color: c.faint }}
+                    className="p-1 rounded hover:bg-gray-200"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                <div className="p-5 flex flex-col items-center gap-3">
+                  {labelOpen.type === "qr" ? (
+                    <>
+                      <QrImg text={labelOpen.value} size={140} />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const url = await qrUrl(labelOpen.value, 280);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `${String(labelOpen.value).replace(/[^\w-]/g, "_")}-qr.png`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                        }}
+                        style={{ color: c.primary, borderColor: c.primary }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md border text-xs font-semibold hover:bg-blue-50"
+                      >
+                        <Download size={13} /> Download PNG
+                      </button>
+                    </>
+                  ) : (
+                    <BarcodeView
+                      value={labelOpen.value}
+                      filename={String(labelOpen.value).replace(/[^\w-]/g, "_")}
+                    />
+                  )}
+                  <p style={{ color: c.muted }} className="text-sm font-medium">
+                    {labelOpen.value}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+      {isExpanded &&
+        hasChildren &&
+        node.children.map((child, i) => (
+          <TreeRow
+            key={child.id || i}
+            node={child}
+            depth={depth + 1}
+            stages={stages}
+            tone={tone}
+            onOpenRow={onOpenRow}
+            onDeleteRow={onDeleteRow}
+            expandedSet={expandedSet}
+            onToggle={onToggle}
+            forceOpen={child.forceOpen}
+            selectedStep={selectedStep}
+          />
+        ))}
+    </React.Fragment>
+  );
+}
+
+function WorkflowRow({ r, stages, tone, onOpenRow, onDeleteRow, forcedStepIndex }) {
   const defaultStep =
     forcedStepIndex !== undefined ? forcedStepIndex : r.step - 1;
   const [selectedStep, setSelectedStep] = useState(defaultStep);
@@ -842,7 +1877,19 @@ function WorkflowRow({ r, stages, tone, onOpenRow, forcedStepIndex }) {
   }, [forcedStepIndex]);
 
   const activeColor = tone === "inward" ? c.primary : "#7C3AED";
-  const currentDocNo = getStepDocNo(r.docBase, tone, selectedStep);
+  const currentDocNo = r.documentId || getStepDocNo(r.docBase, tone, selectedStep);
+  const isOutwardStage = r.flow === "outward" && r.step === stages.length;
+  const [labelOpen, setLabelOpen] = useState(null); // {type, value}
+  const closeLabel = () => setLabelOpen(null);
+  const outQrPayload = [
+    currentDocNo,
+    r.productName ? `Product: ${r.productName}` : "",
+    r.productId ? `SKU: ${r.productId}` : "",
+    r.binRef ? `Bin: ${r.binRef}` : "",
+    r.party && r.party !== "—" ? `Customer: ${r.party}` : "",
+    r.ref && r.ref !== "—" ? `Vehicle: ${r.ref}` : "",
+    r.stageLabel ? `Stage: ${r.stageLabel}` : "Stage: Outward",
+  ].filter(Boolean).join("\n");
 
   const prevDisabled = selectedStep === 0;
   const nextDisabled = selectedStep >= r.step - 1;
@@ -858,6 +1905,7 @@ function WorkflowRow({ r, stages, tone, onOpenRow, forcedStepIndex }) {
   };
 
   return (
+    <React.Fragment>
     <tr style={{ borderTop: `1px solid ${c.border}` }}>
       <td className="py-3 pr-4">
         <div className="flex items-center gap-1.5">
@@ -960,8 +2008,101 @@ function WorkflowRow({ r, stages, tone, onOpenRow, forcedStepIndex }) {
         >
           Open Step {selectedStep + 1}
         </button>
+        {onDeleteRow && (
+          <button
+            onClick={() => onDeleteRow(r)}
+            style={{ color: c.danger }}
+            className="text-xs sm:text-sm font-medium hover:underline whitespace-nowrap ml-3"
+          >
+            Delete
+          </button>
+        )}
+        {isOutwardStage && currentDocNo && (
+          <>
+            <button
+              onClick={() => setLabelOpen({ type: "qr", value: outQrPayload })}
+              className="ml-2 p-1.5 rounded"
+              style={{ color: activeColor, background: c.soft }}
+              title="View & download Outward QR"
+            >
+              <QrCode size={13} />
+            </button>
+            <button
+              onClick={() => setLabelOpen({ type: "barcode", value: currentDocNo })}
+              className="ml-1 p-1.5 rounded"
+              style={{ color: activeColor, background: c.soft }}
+              title="View & download barcode"
+            >
+              <Barcode size={13} />
+            </button>
+          </>
+        )}
       </td>
     </tr>
+    {labelOpen && (
+      <tr>
+        <td colSpan={7}>
+          <div
+            className="fixed inset-0 z-[85] flex items-center justify-center bg-black/40 p-4"
+            onClick={closeLabel}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{ background: c.card, border: `1px solid ${c.border}` }}
+              className="rounded-lg overflow-hidden shadow-2xl"
+            >
+              <div
+                className="px-4 py-3 flex items-center justify-between gap-6"
+                style={{ borderBottom: `1px solid ${c.border}`, background: c.surface }}
+              >
+                <h4 style={{ color: c.text }} className="text-sm font-semibold">
+                  {labelOpen.type === "qr" ? "QR Code" : "Barcode"}
+                </h4>
+                <button
+                  onClick={closeLabel}
+                  style={{ color: c.faint }}
+                  className="p-1 rounded hover:bg-gray-200"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-5 flex flex-col items-center gap-3">
+                {labelOpen.type === "qr" ? (
+                  <>
+                    <QrImg text={labelOpen.value} size={140} />
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const url = await qrUrl(labelOpen.value, 280);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `${String(currentDocNo).replace(/[^\w-]/g, "_")}-qr.png`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                      }}
+                      style={{ color: c.primary, borderColor: c.primary }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md border text-xs font-semibold hover:bg-blue-50"
+                    >
+                      <Download size={13} /> Download PNG
+                    </button>
+                  </>
+                ) : (
+                  <BarcodeView
+                    value={labelOpen.value}
+                    filename={`${String(currentDocNo).replace(/[^\w-]/g, "_")}-barcode`}
+                  />
+                )}
+                <p style={{ color: c.muted }} className="text-sm font-medium">
+                  {labelOpen.value}
+                </p>
+              </div>
+            </div>
+          </div>
+        </td>
+      </tr>
+    )}
+  </React.Fragment>
   );
 }
 
@@ -974,35 +2115,104 @@ function WorkflowPage({
   addLabel,
   onAdd,
   onOpenRow,
+  onDeleteRow,
   footnote,
   globalSearch = "",
 }) {
   const [filterStage, setFilterStage] = useState(null);
+  const [expandedSet, setExpandedSet] = useState(() => new Set());
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
   const activeColor = tone === "inward" ? c.primary : "#7C3AED";
+  const treeMode = Array.isArray(rows) && rows.some((r) => r && Array.isArray(r.children));
+
+  const flatNodes = useMemo(() => {
+    if (!treeMode) return [];
+    const out = [];
+    const walk = (nodes) =>
+      (nodes || []).forEach((n) => {
+        out.push(n);
+        if (n.children) walk(n.children);
+      });
+    walk(rows);
+    return out;
+  }, [rows, treeMode]);
+
+  const matchesQuery = (r, q) => {
+    const docNo = (r.documentId || getStepDocNo(r.docBase, tone, (r.step || 1) - 1) || "").toLowerCase();
+    const baseId = (r.docBase || r.id || "").toLowerCase();
+    const party = (r.party || "").toLowerCase();
+    const ref = (r.ref || "").toLowerCase();
+    const stage = (r.stageLabel || "").toLowerCase();
+    return (
+      docNo.includes(q) ||
+      baseId.includes(q) ||
+      party.includes(q) ||
+      ref.includes(q) ||
+      stage.includes(q)
+    );
+  };
+
+  const filterTree = (nodes, q) => {
+    const out = [];
+    for (const n of nodes) {
+      const matchSelf = !q || matchesQuery(n, q);
+      const kids = n.children ? filterTree(n.children, q) : [];
+      if (matchSelf || (kids && kids.length)) {
+        out.push(matchSelf ? { ...n, children: kids } : { ...n, children: kids, forceOpen: true });
+      }
+    }
+    return out;
+  };
 
   const searchedRows = useMemo(() => {
-    if (!globalSearch.trim()) return rows;
+    if (!globalSearch.trim() || !treeMode) {
+      return treeMode ? rows : rows;
+    }
     const q = globalSearch.toLowerCase();
-    return rows.filter((r) => {
-      const docNo = getStepDocNo(r.docBase, tone, r.step - 1).toLowerCase();
-      const baseId = (r.docBase || "").toLowerCase();
-      const party = (r.party || "").toLowerCase();
-      const ref = (r.ref || "").toLowerCase();
-      const stage = (r.stageLabel || "").toLowerCase();
-      return (
-        docNo.includes(q) ||
-        baseId.includes(q) ||
-        party.includes(q) ||
-        ref.includes(q) ||
-        stage.includes(q)
-      );
-    });
-  }, [rows, globalSearch, tone]);
+    return filterTree(rows, q);
+  }, [rows, globalSearch, tone, treeMode]);
 
   const filteredRows = useMemo(() => {
-    if (filterStage === null) return searchedRows;
-    return searchedRows.filter((r) => r.step >= filterStage + 1);
-  }, [searchedRows, filterStage]);
+    if (filterStage === null || !treeMode) {
+      if (filterStage !== null && !treeMode) {
+        return searchedRows.filter((r) => r.step >= filterStage + 1);
+      }
+      return searchedRows;
+    }
+    const targetStep = filterStage + 1;
+    const keep = (nodes) => {
+      const out = [];
+      for (const r of nodes) {
+        const kids = r.children ? keep(r.children) : [];
+        const selfMatch = r.step === targetStep;
+        if (selfMatch || kids.length) {
+          out.push(
+            selfMatch
+              ? { ...r, children: kids, forceOpen: true }
+              : { ...r, children: kids, forceOpen: kids.length > 0 },
+          );
+        }
+      }
+      return out;
+    };
+    return keep(searchedRows);
+  }, [searchedRows, filterStage, treeMode]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchedRows, filterStage, pageSize]);
+  const pagedRows = filteredRows.slice((page - 1) * pageSize, page * pageSize);
+
+  const toggleNode = (id) => {
+    setExpandedSet((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
 
   return (
     <div className="flex flex-col gap-4">
@@ -1063,7 +2273,7 @@ function WorkflowPage({
             }}
           >
             <span className="text-xs sm:text-sm font-semibold whitespace-nowrap">
-              All Steps ({searchedRows.length})
+              All Steps ({treeMode ? flatNodes.length : searchedRows.length})
             </span>
           </button>
           <ChevronRight
@@ -1074,7 +2284,9 @@ function WorkflowPage({
 
           {stages.map((s, i) => {
             const isSelected = filterStage === i;
-            const count = searchedRows.filter((r) => r.step >= i + 1).length;
+            const count = treeMode
+              ? flatNodes.filter((r) => r.step === i + 1).length
+              : searchedRows.filter((r) => r.step >= i + 1).length;
             return (
               <React.Fragment key={s}>
                 <button
@@ -1137,35 +2349,66 @@ function WorkflowPage({
             matches)
           </div>
         )}
+        <div className="flex justify-end mb-3">
+          <Pager
+            total={filteredRows.length}
+            page={page}
+            setPage={setPage}
+            pageSize={pageSize}
+            setPageSize={setPageSize}
+          />
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-xs sm:text-sm border-collapse min-w-[700px]">
             <thead>
               <tr style={{ color: c.muted }} className="text-left">
                 <th className="font-medium py-2 pr-4">
-                  Step Doc No. (Use Arrows)
+                  {treeMode ? "Document No." : "Step Doc No. (Use Arrows)"}
                 </th>
                 <th className="font-medium py-2 pr-4">Party</th>
                 <th className="font-medium py-2 pr-4">Ref.</th>
-                <th className="font-medium py-2 pr-4">Selected Step</th>
-                <th className="font-medium py-2 pr-4">Stage Status</th>
+                <th className="font-medium py-2 pr-4">
+                  {treeMode ? "Stage" : "Selected Step"}
+                </th>
+                <th className="font-medium py-2 pr-4">
+                  {treeMode ? "Flow" : "Stage Status"}
+                </th>
                 <th className="font-medium py-2 pr-4">Completion</th>
                 <th className="font-medium py-2">Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredRows.length > 0 ? (
-                filteredRows.map((r, i) => (
-                  <WorkflowRow
-                    key={i}
-                    r={r}
-                    stages={stages}
-                    tone={tone}
-                    onOpenRow={onOpenRow}
-                    forcedStepIndex={
-                      filterStage !== null ? filterStage : undefined
-                    }
-                  />
-                ))
+                treeMode ? (
+                  pagedRows.map((r, i) => (
+                    <TreeRow
+                      key={r.id || i}
+                      node={r}
+                      stages={stages}
+                      tone={tone}
+                      onOpenRow={onOpenRow}
+                      onDeleteRow={onDeleteRow}
+                      expandedSet={expandedSet}
+                      onToggle={toggleNode}
+                      forceOpen={r.forceOpen}
+                      selectedStep={filterStage}
+                    />
+                  ))
+                ) : (
+                  pagedRows.map((r, i) => (
+                    <WorkflowRow
+                      key={i}
+                      r={r}
+                      stages={stages}
+                      tone={tone}
+                      onOpenRow={onOpenRow}
+                      onDeleteRow={onDeleteRow}
+                      forcedStepIndex={
+                        filterStage !== null ? filterStage : undefined
+                      }
+                    />
+                  ))
+                )
               ) : (
                 <tr>
                   <td
@@ -1220,22 +2463,39 @@ function FloatingForm({
   onSave,
   onSaveCopy,
   onStep,
-  onSetStage,
   onMove,
   onAddPhoto,
   onRemovePhoto,
+  onAddChild,
+  onRemoveChild,
+  onUpdateChild,
+  onSaveChild,
+  onToggleChild,
 }) {
+  const [showFields, setShowFields] = useState(
+    !form.flowStages || form.stageIndex === 0,
+  );
   const tone = FLOW_COLORS[form.tone] || FLOW_COLORS.simple;
   const isFlow = !!form.flowStages;
   const stageLabel = isFlow ? form.flowStages[form.stageIndex] : form.title;
+
+  useEffect(() => {
+    setShowFields(!isFlow || form.stageIndex === 0 || (form.childForms || []).length > 0);
+  }, [form.stageIndex, form.childForms?.length, isFlow]);
+
   const leftDisabled = !isFlow || form.stageIndex === 0;
   const rightDisabled =
     !isFlow || form.stageIndex === form.flowStages.length - 1;
 
   const currentDocId =
-    isFlow && form.docBase
+    form.documentId || (isFlow && form.docBase
       ? getStepDocNo(form.docBase, form.tone, form.stageIndex)
-      : form.docId;
+      : form.docId);
+
+  const canAddChild = isFlow && form.stageIndex < form.flowStages.length - 1;
+  const isFirstStep = !isFlow || form.stageIndex === 0;
+  const childForms = form.childForms || [];
+  const stageChildren = childForms.filter((c) => c.stageIndex === form.stageIndex);
 
   const currentFields = form.fields ||
     STAGE_FIELDS[stageLabel] ||
@@ -1485,34 +2745,209 @@ function FloatingForm({
         </div>
       )}
 
-      <div className="px-4 py-4 flex-1 md:flex-initial flex flex-col gap-4 overflow-y-auto max-h-none md:max-h-[420px]">
-        {isFlow && (
-          <p style={{ color: c.faint }} className="text-xs -mt-1">
-            Fields update dynamically as this consignment advances through
-            stages.
-          </p>
-        )}
-        {currentFields.map((f) => (
-          <div key={f.key} className="flex flex-col gap-1">
-            <label style={{ color: c.muted }} className="text-xs font-medium">
-              {f.label}
-            </label>
-            <input
-              type={f.type || "text"}
-              value={
-                form.values[`${stageLabel}_${f.key}`] ||
-                form.values[f.key] ||
-                ""
-              }
-              onChange={(e) =>
-                onChange(form.id, `${stageLabel}_${f.key}`, e.target.value)
-              }
-              placeholder={f.type === "date" ? undefined : (f.placeholder || `Enter ${f.label.toLowerCase()}`)}
-              style={{ borderColor: c.border, color: c.text }}
-              className="px-3 py-2.5 sm:py-2 rounded-md border text-sm outline-none focus:ring-2"
-            />
+      <div className="px-4 py-4 flex-1 min-h-0 flex flex-col gap-4 overflow-y-auto md:max-h-[calc(100vh-230px)]">
+        {!isFlow ? (
+          showFields &&
+          currentFields.map((f) => (
+            <div key={f.key} className="flex flex-col gap-1">
+              <label style={{ color: c.muted }} className="text-xs font-medium">
+                {f.label}
+              </label>
+              <div className="flex items-center gap-1">
+                <input
+                  type={f.type || "text"}
+                  value={
+                    form.values[`${stageLabel}_${f.key}`] ||
+                    form.values[f.key] ||
+                    ""
+                  }
+                  onChange={(e) =>
+                    onChange(form.id, `${stageLabel}_${f.key}`, e.target.value)
+                  }
+                  placeholder={f.type === "date" ? undefined : (f.placeholder || `Enter ${f.label.toLowerCase()}`)}
+                  style={{ borderColor: c.border, color: c.text }}
+                  className="flex-1 px-3 py-2.5 sm:py-2 rounded-md border text-sm outline-none focus:ring-2"
+                />
+                {(f.type !== "date") && (
+                  <ScanInput
+                    value={form.values[`${stageLabel}_${f.key}`] || form.values[f.key] || ""}
+                    onValue={(t) => onChange(form.id, `${stageLabel}_${f.key}`, t)}
+                  />
+                )}
+              </div>
+            </div>
+          ))
+        ) : stageChildren.length === 0 ? (
+          <div className="flex flex-col items-center gap-3 py-6 text-center">
+            <button
+              type="button"
+              onClick={() => onAddChild(form.id)}
+              style={{ background: tone }}
+              className="flex items-center justify-center gap-2 px-5 py-2.5 rounded-md text-sm font-semibold text-white hover:opacity-90"
+            >
+              <Plus size={18} /> New {form.flowStages[(form.stageIndex || 0)]}
+            </button>
+            <span style={{ color: c.faint }} className="text-xs">
+              Click to add a new {form.flowStages[(form.stageIndex || 0)]} document
+            </span>
           </div>
-        ))}
+        ) : (
+          <div className="flex flex-col gap-3 pt-1">
+            <div className="flex items-center justify-between">
+              <h5 style={{ color: c.text }} className="text-sm font-semibold">
+                {form.flowStages[(form.stageIndex || 0)]} documents
+              </h5>
+              <span style={{ color: c.muted }} className="text-xs">
+                {stageChildren.length} form{stageChildren.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            {stageChildren.map((child) => {
+          const childFields = STAGE_FIELDS[child.stageLabel] || currentFields;
+          const isInward = child.stageLabel === "Inward";
+          const childQrPayload = [
+            child.docId,
+            child.values && child.values.productId ? `SKU: ${child.values.productId}` : "",
+            child.values && child.values.productName ? `Product: ${child.values.productName}` : "",
+            child.values && child.values.binRef ? `Bin: ${child.values.binRef}` : "",
+            child.values && child.values.vendor ? `Vendor: ${child.values.vendor}` : "",
+            child.values && child.values.customer ? `Customer: ${child.values.customer}` : "",
+          ].filter(Boolean).join("\n");
+          return (
+            <section
+              key={child.id}
+              className="rounded-md border overflow-hidden"
+              style={{ borderColor: c.border }}
+            >
+              <button
+                type="button"
+                onClick={() => onToggleChild(form.id, child.id)}
+                className="w-full px-3 py-3 flex items-center justify-between gap-3 text-left"
+                style={{ background: c.surface, color: c.text }}
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <ChevronDown
+                    size={16}
+                    className={child.open ? "transition-transform" : "-rotate-90 transition-transform"}
+                    style={{ color: tone }}
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold truncate">{child.stageLabel}</span>
+                    <span style={{ color: tone }} className="block text-xs font-bold mt-0.5">{child.docId}</span>
+                  </span>
+                </span>
+                <span className="flex items-center gap-2">
+                  {!child.saved && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRemoveChild(form.id, child.id);
+                      }}
+                      style={{ color: c.danger }}
+                      className="p-1 rounded hover:bg-red-50"
+                      title="Remove this form"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                  <Pill tone={child.saved ? "success" : "primary"}>{child.saved ? "Saved" : "Draft"}</Pill>
+                </span>
+              </button>
+              {child.open && (
+                <div className="p-3 flex flex-col gap-3" style={{ background: c.card }}>
+                {childFields.map((field) => (
+                  <div key={field.key} className="flex flex-col gap-1">
+                    <label style={{ color: c.muted }} className="text-xs font-medium">
+                      {field.label}
+                    </label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type={field.type || "text"}
+                        value={child.values[field.key] || ""}
+                        onChange={(event) => onUpdateChild(form.id, child.id, field.key, event.target.value)}
+                        placeholder={field.type === "date" ? undefined : field.placeholder || `Enter ${field.label.toLowerCase()}`}
+                        disabled={child.saved}
+                        style={{ borderColor: c.border, color: c.text }}
+                        className="flex-1 px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 disabled:bg-gray-50 disabled:text-gray-500"
+                      />
+                      {(!child.saved && field.type !== "date") && (
+                        <ScanInput
+                          value={child.values[field.key] || ""}
+                          onValue={(t) => onUpdateChild(form.id, child.id, field.key, t)}
+                        />
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {!child.saved && (
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => onSaveChild(form.id, child.id)}
+                      style={{ background: tone }}
+                      className="px-3 py-1.5 rounded-md text-xs font-semibold text-white"
+                    >
+                      Save
+                    </button>
+                  </div>
+                )}
+                {isInward && child.saved && (
+                  <div
+                    className="flex flex-col gap-3 rounded-md border p-3"
+                    style={{ borderColor: c.border, background: c.surface }}
+                  >
+                    <span style={{ color: c.muted }} className="text-xs font-semibold uppercase">
+                      Inward Label
+                    </span>
+                    <div className="flex items-center gap-6 flex-wrap">
+                      <div className="flex flex-col items-center gap-1">
+                        <BarcodeView
+                          value={child.docId}
+                          filename={`${String(child.docId).replace(/[^\w-]/g, "_")}-barcode`}
+                          width={190}
+                          height={50}
+                        />
+                      </div>
+                      <div className="flex flex-col items-center gap-1">
+                        <QrImg text={childQrPayload} size={96} />
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const url = await qrUrl(childQrPayload, 200);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `${String(child.docId).replace(/[^\w-]/g, "_")}-qr.png`;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                          }}
+                          style={{ color: c.primary }}
+                          className="text-xs font-medium hover:underline flex items-center gap-1"
+                        >
+                          <Download size={12} /> Download
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                </div>
+              )}
+            </section>
+          );
+            })}
+
+            {canAddChild && (
+              <button
+                type="button"
+                onClick={() => onAddChild(form.id)}
+                style={{ color: tone, borderColor: tone }}
+                className="self-start px-3 py-1.5 rounded-md border text-xs font-semibold hover:bg-blue-50"
+              >
+                <Plus size={14} className="inline mr-1" /> New {form.flowStages[(form.stageIndex || 0)]}
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Photo Attachment Section */}
         {!form.hidePhoto && (
@@ -1602,32 +3037,32 @@ function FloatingForm({
         )}
       </div>
 
-      <div
-        className="px-4 py-3 pb-20 md:pb-3 flex items-center justify-end gap-2"
-        style={{ borderTop: `1px solid ${c.border}`, background: c.card }}
-      >
-        <button
-          onClick={() => onClose(form.id)}
-          style={{ color: c.muted, borderColor: c.border }}
-          className="px-4 py-2 md:py-1.5 rounded-md border text-sm font-medium hover:bg-gray-50"
-        >
-          Cancel
-        </button>
-        <button
-          onClick={() => onSaveCopy(form.id)}
-          style={{ color: tone, borderColor: tone }}
-          className="px-3.5 py-2 md:py-1.5 rounded-md border text-sm font-medium flex items-center gap-1.5 hover:opacity-80"
-        >
-          <Copy size={14} /> Save & Copy
-        </button>
-        <button
-          onClick={() => onSave(form.id)}
-          style={{ background: tone }}
-          className="px-4 py-2 md:py-1.5 rounded-md text-sm font-medium text-white hover:opacity-90"
-        >
-          Save
-        </button>
-      </div>
+<div
+  className="px-4 py-3 pb-20 md:pb-3 flex items-center justify-end gap-2"
+  style={{ borderTop: `1px solid ${c.border}`, background: c.card }}
+>
+  <button
+    onClick={() => onClose(form.id)}
+    style={{ color: c.muted, borderColor: c.border }}
+    className="px-4 py-2 md:py-1.5 rounded-md border text-sm font-medium hover:bg-gray-50"
+  >
+    Cancel
+  </button>
+  <button
+    onClick={() => onSaveCopy(form.id)}
+    style={{ color: tone, borderColor: tone }}
+    className="px-3.5 py-2 md:py-1.5 rounded-md border text-sm font-medium flex items-center gap-1.5 hover:opacity-80"
+  >
+    <Copy size={14} /> Save & Copy
+  </button>
+  <button
+    onClick={() => onSave(form.id)}
+    style={{ background: tone }}
+    className="px-4 py-2 md:py-1.5 rounded-md text-sm font-medium text-white hover:opacity-90"
+  >
+    Save
+  </button>
+</div>
     </div>
   );
 }
@@ -1683,9 +3118,182 @@ export default function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [searchQuery, setSearchQuery] = useState("");
   const [forms, setForms] = useState([]);
+  const [appData, setAppData] = useState(initialAppData);
+  const [savedWorkflowRows, setSavedWorkflowRows] = useState([]);
   const idRef = useRef(0);
   const zRef = useRef(60);
   const cascadeRef = useRef(0);
+  const { fresh, near, expired, non, total } = useMemo(() => {
+    const counts = appData.products.reduce(
+      (acc, product) => {
+        const status = product.status;
+        if (status === "fresh") acc.fresh++;
+        else if (status === "near expiry") acc.near++;
+        else if (status === "expired") acc.expired++;
+        else if (status === "non expiring") acc.non++;
+        return acc;
+      },
+      { fresh: 0, near: 0, expired: 0, non: 0 },
+    );
+    return {
+      ...counts,
+      total: counts.fresh + counts.near + counts.expired + counts.non,
+    };
+  }, [appData.products]);
+
+  // Pipeline counts: number of completed stage records at or beyond each step
+  // in the (now hierarchical) inward tree.
+  const inwardCounts = useMemo(() => {
+    const acc = Object.fromEntries(IN_TYPE_KEYS.map((k) => [k, 0]));
+    const byType = { preGateInward: 0, gateInward: 0, inward: 0, checklistUnloading: 0, qualityCheck: 0, goodReceiptNote: 0 };
+    appData.inward.forEach((r) => {
+      if (r.status === "completed" && byType[r.type] !== undefined) byType[r.type]++;
+    });
+    IN_TYPE_KEYS.forEach((key, idx) => {
+      // funnel: records at this stage or deeper
+      for (let j = idx; j < IN_TYPE_KEYS.length; j++) acc[IN_TYPE_KEYS[j]] += byType[key];
+    });
+    return acc;
+  }, [appData.inward]);
+
+  const outwardCounts = useMemo(() => {
+    const acc = {
+      pickList: 0,
+      pick: 0,
+      qualityCheckOutward: 0,
+      checklistLoading: 0,
+      dispatch: 0,
+      outward: 0,
+    };
+    appData.outwardConsignments.forEach((c) => {
+      const stage = c.currentStage || 0;
+      OUT_TYPE_KEYS.forEach((key, idx) => {
+        if (stage >= idx + 1) acc[key]++;
+      });
+    });
+    return acc;
+  }, [appData.outwardConsignments]);
+
+  // Derived lists for tables from real data
+  // Build the inward flow as a tree keyed by parentId, rooted at PreGateInward.
+  const inwardRows = useMemo(() => {
+    const nodesById = {};
+    const byParent = {};
+    appData.inward.forEach((rec) => {
+      const typeMeta = IN_STAGE_META.find((m) => m.key === rec.type);
+      const prod =
+        rec.productId &&
+        appData.products.find((p) => p.id === rec.productId);
+      nodesById[rec.id] = {
+        id: rec.id,
+        docBase: rec.rootId || rec.id,
+        documentId: rec.id,
+        party: rec.customer || rec.vendor || "—",
+        ref: rec.vehicleNo || "—",
+        productName: prod ? prod.name : null,
+        productId: rec.productId || null,
+        binRef: rec.binRef || null,
+        step: typeMeta ? IN_STAGE_META.indexOf(typeMeta) + 1 : 1,
+        stageLabel: typeMeta ? typeMeta.label : rec.type,
+        tone:
+          rec.status === "completed"
+            ? "success"
+            : primaryForStep((typeMeta ? IN_STAGE_META.indexOf(typeMeta) : 0) + 1),
+        flow: "inward",
+        children: [],
+      };
+      const parentKey = rec.parentId || "__root__";
+      (byParent[parentKey] = byParent[parentKey] || []).push(rec.id);
+    });
+    // attach children in insertion order
+    appData.inward.forEach((rec) => {
+      const kids = byParent[rec.id] || [];
+      nodesById[rec.id].children = kids.map((id) => nodesById[id]);
+    });
+    const roots = (byParent["__root__"] || []).map((id) => nodesById[id]);
+    return roots;
+  }, [appData]);
+
+  const outwardRows = useMemo(
+    () =>
+      appData.outwardConsignments.map((c) => {
+        const stagesDone = appData.outward.filter(
+          (r) => r.commonNumber === c.commonNumber && r.status === "completed",
+        );
+        const cur = appData.outward.find(
+          (r) =>
+            r.commonNumber === c.commonNumber &&
+            r.type === OUT_TYPE_KEYS[c.currentStage - 1],
+        );
+        const currentOutStage =
+          cur || stagesDone[stagesDone.length - 1] || null;
+        const prod =
+          currentOutStage &&
+          currentOutStage.productId &&
+          appData.products.find((p) => p.id === currentOutStage.productId);
+        return {
+          docBase: c.id,
+          documentId: currentOutStage ? currentOutStage.id : null,
+          party: c.customer,
+          ref: c.vehicleNo || "—",
+          productName: prod ? prod.name : null,
+          productId: currentOutStage ? currentOutStage.productId || null : null,
+          binRef: currentOutStage ? currentOutStage.binRef || null : null,
+          step: c.currentStage,
+          stageLabel: currentOutStage
+            ? OUT_STAGE_META[c.currentStage - 1].label
+            : "",
+          tone:
+            c.currentStage >= OUT_TYPE_KEYS.length
+              ? "success"
+              : primaryForStep(c.currentStage),
+          flow: "outward",
+        };
+      }),
+    [appData],
+  );
+
+  // Dashboard summary stats computed from real data
+  const dashboardStats = useMemo(() => {
+    const cellStatus = (s) =>
+      s && typeof s === "object" ? s.status : s && s !== "empty" ? s : s;
+    const totalBins = appData.bins.cells.length;
+    const occupiedBins = appData.bins.cells.filter(
+      (s) => s && (typeof s !== "string" || s !== "empty"),
+    ).length;
+    const utilization = totalBins
+      ? Math.round((occupiedBins / totalBins) * 100)
+      : 0;
+
+    // QC waiting = consignments whose current stage is QC (qualityCheck / qualityCheckOutward)
+    const pendingInwardQC = appData.inwardConsignments.filter(
+      (c) => c.currentStage && c.currentStage <= 4,
+    ).length;
+    const pendingOutwardQC = appData.outwardConsignments.filter(
+      (c) => c.currentStage && c.currentStage <= 3,
+    ).length;
+
+    // Dispatches = outward consignments that have reached dispatch or beyond
+    const dispatched = appData.outwardConsignments.filter(
+      (c) => c.currentStage >= 5,
+    ).length;
+
+    const binsDetail = {};
+    appData.bins.cells.forEach((s) => {
+      const key = cellStatus(s) || "empty";
+      binsDetail[key] = (binsDetail[key] || 0) + 1;
+    });
+
+    return {
+      utilization,
+      occupiedBins,
+      totalBins,
+      binsDetail,
+      pendingInwardQC,
+      pendingOutwardQC,
+      dispatched,
+    };
+  }, [appData]);
 
   const openForm = (config) => {
     idRef.current += 1;
@@ -1728,6 +3336,122 @@ export default function App() {
       ),
     );
 
+  const addChildForm = (parentId) =>
+    setForms((previousForms) =>
+      previousForms.map((form) => {
+        if (form.id !== parentId || !form.flowStages) return form;
+        const childStageIndex = form.stageIndex;
+        const childPrefix = (form.tone === "inward" ? IN_PREFIXES : OUT_PREFIXES)[childStageIndex] || "DOC";
+        const childId = childHierarchyId(childPrefix, genBaseDoc());
+        const child = {
+          id: childId,
+          docId: childId,
+          stageIndex: childStageIndex,
+          stageLabel: form.flowStages[childStageIndex],
+          values: {},
+          open: true,
+          saved: false,
+        };
+        return { ...form, childForms: [...(form.childForms || []), child] };
+      }),
+    );
+
+  const removeChildForm = (parentId, childId) =>
+    setForms((previousForms) =>
+      previousForms.map((form) =>
+        form.id !== parentId
+          ? form
+          : {
+              ...form,
+              childForms: (form.childForms || []).filter((c) => c.id !== childId),
+            },
+      ),
+    );
+
+  const updateChildForm = (parentId, childId, key, value) =>
+    setForms((previousForms) =>
+      previousForms.map((form) =>
+        form.id !== parentId
+          ? form
+          : {
+              ...form,
+              childForms: form.childForms.map((child) =>
+                child.id === childId
+                  ? { ...child, values: { ...child.values, [key]: value } }
+                  : child,
+              ),
+            },
+      ),
+    );
+
+  const toggleChildForm = (parentId, childId) =>
+    setForms((previousForms) =>
+      previousForms.map((form) =>
+        form.id !== parentId
+          ? form
+          : {
+              ...form,
+              childForms: form.childForms.map((child) =>
+                child.id === childId ? { ...child, open: !child.open } : child,
+              ),
+            },
+      ),
+    );
+
+  const saveChildForm = (parentId, childId) => {
+    const parent = forms.find((form) => form.id === parentId);
+    const child = parent?.childForms?.find((item) => item.id === childId);
+    if (!parent || !child || child.saved) return;
+
+    const collection = parent.tone === "inward" ? "inward" : "outward";
+    const typeKeys = parent.tone === "inward" ? IN_TYPE_KEYS : OUT_TYPE_KEYS;
+    const parentDocId =
+      parent.documentId ||
+      getStepDocNo(parent.docBase, parent.tone, parent.stageIndex);
+    const record = {
+      id: child.docId,
+      type: typeKeys[child.stageIndex] || child.stageLabel,
+      parentId: parentDocId,
+      rootId:
+        parent.documentId && parent.documentId.startsWith("PR-")
+          ? parent.documentId
+          : undefined,
+      commonNumber: child.values.commonNumber || parent.docBase,
+      status: child.values.status || "pending",
+      values: child.values,
+    };
+
+    setAppData((previousData) => ({
+      ...previousData,
+      [collection]: [...previousData[collection], record],
+    }));
+    setSavedWorkflowRows((previousRows) => [
+      ...previousRows,
+      {
+        documentId: child.docId,
+        docBase: parent.docBase,
+        party: child.values.vendor || child.values.customer || "New consignment",
+        ref: child.values.vehicleNo || child.values.ewayBill || "—",
+        step: child.stageIndex + 1,
+        stageLabel: child.stageLabel,
+        tone: "primary",
+        flow: parent.tone,
+      },
+    ]);
+    setForms((previousForms) =>
+      previousForms.map((form) =>
+        form.id !== parentId
+          ? form
+          : {
+              ...form,
+              childForms: form.childForms.map((item) =>
+                item.id === childId ? { ...item, saved: true } : item,
+              ),
+            },
+      ),
+    );
+  };
+
   const addPhotoToForm = (id, photoUrl) =>
     setForms((prev) =>
       prev.map((f) =>
@@ -1759,15 +3483,88 @@ export default function App() {
       }),
     );
 
-  const setStageForm = (id, stageIndex) =>
-    setForms((prev) =>
-      prev.map((f) => {
-        if (f.id !== id || !f.flowStages) return f;
-        return { ...f, stageIndex };
-      }),
-    );
+  const saveForm = (id) => {
+    const form = forms.find((f) => f.id === id);
+    if (!form) return;
+    const values = form.values || {};
+    const collection = form.tone && form.tone.includes("inward") ? "inward" : "outward";
 
-  const saveForm = (id) => closeForm(id);
+    // Build a primary-key record. If this is a workflow form, we create a stage record
+    // keyed off the consignment's common number so it can be linked as a foreign key later.
+    const commonNumber =
+      values.commonNumber ||
+      (form.flowStages
+        ? `${form.tone === "inward" ? "CN-IN" : "CN-OUT"}-${Date.now().toString().slice(-6)}`
+        : `${form.tone === "inward" ? "I" : "O"}${Date.now().toString().slice(-6)}`);
+
+    const recordId =
+      values.id ||
+      (form.documentId ||
+        (form.flowStages
+          ? getStepDocNo(form.docBase || String(genBaseDoc()), form.tone, form.stageIndex || 0)
+          : `${String(form.tone || "DOC").toUpperCase()}-${genBaseDoc()}`));
+
+    const existing = (appData[collection] || []).find((x) => x.id === recordId);
+    const typeKey = form.flowStages
+      ? (form.tone === "inward" ? IN_TYPE_KEYS : OUT_TYPE_KEYS)[form.stageIndex || 0]
+      : form.title;
+
+    if (existing) {
+      // EDIT mode: merge edited values into the existing record, preserving
+      // relational keys (id, type, parentId, commonNumber, sequence, status).
+      const merged = {
+        ...existing,
+        values,
+        customer:
+          values.customer !== undefined ? values.customer : existing.customer,
+        vendor: values.vendor !== undefined ? values.vendor : existing.vendor,
+        vehicleNo:
+          values.vehicleNo !== undefined ? values.vehicleNo : existing.vehicleNo,
+        productId:
+          values.productId !== undefined ? values.productId : existing.productId,
+        binRef: values.binRef !== undefined ? values.binRef : existing.binRef,
+      };
+      setAppData((prev) => ({
+        ...prev,
+        [collection]: prev[collection].map((x) =>
+          x.id === recordId ? merged : x,
+        ),
+      }));
+      closeForm(id);
+      return;
+    }
+
+    const newRecord = {
+      id: recordId,
+      type: typeKey,
+      commonNumber,
+      parentId: values.parentId || null,
+      status: values.status || "completed",
+      values,
+      createdAt: new Date().toISOString().slice(0, 10),
+    };
+
+    setAppData((prev) => ({
+      ...prev,
+      [collection]: [...prev[collection], newRecord],
+    }));
+    setSavedWorkflowRows((prev) => [
+      ...prev,
+      {
+        documentId: newRecord.id,
+        docBase: form.docBase,
+        party: values.vendor || values.customer || "New consignment",
+        ref: values.vehicleNo || values.ewayBill || "—",
+        step: (form.stageIndex || 0) + 1,
+        stageLabel: form.flowStages
+          ? form.flowStages[form.stageIndex || 0]
+          : form.title,
+        tone: "primary",
+        flow: form.tone ? (form.tone.includes("inward") ? "inward" : "outward") : "simple",
+      },
+    ]);
+    closeForm(id);
+  };
   const saveAndCopy = (id) => {
     const f = forms.find((x) => x.id === id);
     if (!f) return;
@@ -1785,22 +3582,256 @@ export default function App() {
 
   const openSimpleForm = (title, tone = "simple", hidePhoto = false, initialValues = {}, fields = null) =>
     openForm({ kind: "simple", title, tone, hidePhoto, values: initialValues, fields });
-  const openInwardForm = (stageIndex = 0, docBase = "3021") =>
+
+  // Build form values from an existing stage record, keeping only fields that
+  // the current stage's form can edit (so JSON data round-trips correctly).
+  const recordToValues = (record, tone) => {
+    if (!record) return {};
+    const stages = tone === "inward" ? IN_STAGE_META : OUT_STAGE_META;
+    const fieldKeys = [];
+    stages.forEach((meta) => {
+      const fields = STAGE_FIELDS[meta.label];
+      if (fields) fields.forEach((f) => fieldKeys.push(f.key));
+    });
+    const out = {};
+    fieldKeys.forEach((key) => {
+      if (record[key] != null && record[key] !== "") out[key] = record[key];
+    });
+    out.id = record.id;
+    if (record.commonNumber) out.commonNumber = record.commonNumber;
+    if (record.productId) out.productId = record.productId;
+    if (record.binRef) out.binRef = record.binRef;
+    return out;
+  };
+
+  // When opening an existing workflow document for edit, seed collapsible
+  // child forms for the ENTIRE tree (from the consignment root down) so every
+  // stage has its saved data whether you navigate forward OR backward with the
+  // stepper. Values are pulled from each record's direct fields (records store
+  // stage fields top-level, not in a `values` object).
+  const seedChildForms = (flow, documentId, stageIndex) => {
+    if (!documentId) return [];
+    const col = flow === "inward" ? "inward" : "outward";
+    const keys = flow === "inward" ? IN_TYPE_KEYS : OUT_TYPE_KEYS;
+    const stagesArr = flow === "inward" ? INWARD_STAGES : OUTWARD_STAGES;
+    const all = appData[col] || [];
+    const byParent = {};
+    all.forEach((r) => {
+      (byParent[r.parentId] = byParent[r.parentId] || []).push(r);
+    });
+
+    // Walk up the parent chain to the consignment ROOT so earlier stages are
+    // included too (otherwise going Back to a previous step is blank).
+    let rec = all.find((r) => r.id === documentId) || null;
+    const seen = new Set();
+    while (rec && rec.parentId && !seen.has(rec.parentId)) {
+      seen.add(rec.parentId);
+      const p = all.find((r) => r.id === rec.parentId);
+      if (!p) break;
+      rec = p;
+    }
+    const rootId = rec ? rec.id : documentId;
+
+    const forms = [];
+    const collect = (r) => {
+      const stIdx = keys.indexOf(r.type);
+      const label = stagesArr[stIdx] || stagesArr[0];
+      forms.push({
+        id: r.id,
+        docId: r.id,
+        stageIndex: stIdx >= 0 ? stIdx : 0,
+        stageLabel: label,
+        values: recordToValues(r, flow),
+        open: r.id === documentId,
+        saved: true,
+        isSelf: r.id === documentId,
+      });
+      (byParent[r.id] || []).forEach(collect);
+    };
+    const root = all.find((r) => r.id === rootId);
+    if (root) collect(root);
+    return forms;
+  };
+
+  const openInwardForm = (stageIndex = 0, docBase = "3021", documentId, values = {}) =>
     openForm({
       kind: "workflow",
       tone: "inward",
       flowStages: INWARD_STAGES,
       stageIndex,
       docBase,
+      documentId,
+      values,
+      isEdit: !!documentId,
+      childForms: seedChildForms("inward", documentId, stageIndex),
     });
-  const openOutwardForm = (stageIndex = 0, docBase = "0552") =>
+  const openOutwardForm = (stageIndex = 0, docBase = "0552", documentId, values = {}) =>
     openForm({
       kind: "workflow",
       tone: "outward",
       flowStages: OUTWARD_STAGES,
       stageIndex,
       docBase,
+      documentId,
+      values,
+      isEdit: !!documentId,
+      childForms: seedChildForms("outward", documentId, stageIndex),
     });
+
+  // Masters CRUD -> persistent appData + soft-delete via Recycle Bin.
+  const MASTER_FIELDS = {
+    customers: ["id", "name", "gstin", "city", "contact"],
+    products: ["id", "name", "category", "unit", "reorderLevel", "expiryDate", "status"],
+    vendors: ["id", "name", "gstin", "city", "contact"],
+    locations: ["code", "zone", "capacity", "status"],
+    users: ["id", "name", "role", "status"],
+  };
+
+  const addMaster = (collection, row) =>
+    setAppData((prev) => {
+      const fields = MASTER_FIELDS[collection] || [];
+      const record = {};
+      fields.forEach((k, i) => {
+        record[k] = row[i] !== undefined ? row[i] : "";
+      });
+      return { ...prev, [collection]: [...(prev[collection] || []), record] };
+    });
+
+  const updateMaster = (collection, row, index) =>
+    setAppData((prev) => {
+      const fields = MASTER_FIELDS[collection] || [];
+      const record = {};
+      fields.forEach((k, i) => {
+        record[k] = row[i] !== undefined ? row[i] : "";
+      });
+      const list = prev[collection] || [];
+      const idx = index >= 0 && index < list.length ? index : -1;
+      const updated = list.map((r, i) => (i === idx ? record : r));
+      return { ...prev, [collection]: updated };
+    });
+
+  const moveToTrash = (collection, index) =>
+    setAppData((prev) => {
+      const list = prev[collection] || [];
+      const record = list[index];
+      if (!record) return prev;
+      return {
+        ...prev,
+        [collection]: list.filter((_, i) => i !== index),
+        trash: [
+          ...prev.trash,
+          { collection, record, deletedAt: new Date().toISOString().slice(0, 10) },
+        ],
+      };
+    });
+
+  const restoreFromTrash = (trashIndex) =>
+    setAppData((prev) => {
+      const item = prev.trash[trashIndex];
+      if (!item) return prev;
+      const nextTrash = prev.trash.filter((_, i) => i !== trashIndex);
+
+      // Single stage/document record (e.g. one Quality Check) -> restore into flow list.
+      if (item.kind === "stageRecord" && item.flow && item.record) {
+        return {
+          ...prev,
+          trash: nextTrash,
+          [item.flow]: [...(prev[item.flow] || []), item.record],
+        };
+      }
+
+      // Whole consignment tree (root delete) -> restore consignment + all stage records.
+      if (item.kind === "transaction" && item.flow) {
+        const consignmentCol =
+          item.flow === "inward" ? "inwardConsignments" : "outwardConsignments";
+        return {
+          ...prev,
+          trash: nextTrash,
+          [item.flow]: [...(prev[item.flow] || []), ...(item.stageRecords || [])],
+          [consignmentCol]: item.consignment
+            ? [...(prev[consignmentCol] || []), item.consignment]
+            : prev[consignmentCol],
+        };
+      }
+
+      // Master record -> restore into its collection.
+      return {
+        ...prev,
+        trash: nextTrash,
+        [item.collection]: [...(prev[item.collection] || []), item.record],
+      };
+    });
+
+  const deletePermanently = (trashIndex) =>
+    setAppData((prev) => ({
+      ...prev,
+      trash: prev.trash.filter((_, i) => i !== trashIndex),
+    }));
+
+  // Soft-delete a whole transaction: its consignment metadata + every stage
+  // record move to the Recycle Bin as a single restore-able bundle.
+  const deleteConsignment = (row) => {
+    const flow = row.flow || (row.docBase && row.docBase.startsWith("INQ") ? "inward" : "outward");
+    const flowKey = flow === "inward" ? "inward" : "outward";
+    const targetId = row.documentId || row.id;
+
+    // Find the target record. Child tree nodes point to a single stage record.
+    const targetRecord = (appData[flowKey] || []).find((r) => r.id === targetId);
+
+    // A node is a consignment ROOT when it has no parent (PreGateInward / outward consignment).
+    const isRoot = !targetRecord || !targetRecord.parentId;
+    const consignmentCol = flow === "inward" ? "inwardConsignments" : "outwardConsignments";
+
+    if (isRoot) {
+      // Deleting a root deletes its whole tree + consignment (one trash bundle).
+      const rootRec =
+        targetRecord ||
+        (appData[flowKey] || []).find(
+          (r) => r.rootId === targetId || r.id === row.docBase || r.id === targetId,
+        );
+      const rootId = rootRec ? rootRec.rootId || rootRec.id : targetId;
+      const root = (appData[flowKey] || []).find((r) => r.id === rootId);
+      const consignment = (appData[consignmentCol] || []).find(
+        (c) => c.commonNumber === root?.commonNumber || c.id === row.docBase,
+      );
+      const treeRecords = (appData[flowKey] || []).filter(
+        (r) => r.rootId === rootId || r.id === rootId || r.commonNumber === consignment?.commonNumber,
+      );
+      const item = {
+        collection: "transaction",
+        kind: "transaction",
+        flow,
+        consignment,
+        stageRecords: treeRecords,
+        deletedAt: new Date().toISOString().slice(0, 10),
+      };
+      setAppData((prev) => ({
+        ...prev,
+        trash: [...prev.trash, item],
+        [flowKey]: (prev[flowKey] || []).filter(
+          (r) => !treeRecords.some((x) => x.id === r.id),
+        ),
+        [consignmentCol]: (prev[consignmentCol] || []).filter(
+          (c) => c.id !== (consignment && consignment.id),
+        ),
+      }));
+      return;
+    }
+
+    // Delete a single stage/document record (e.g. one Quality Check) only.
+    const item = {
+      collection: "transaction",
+      kind: "stageRecord",
+      flow,
+      record: targetRecord,
+      deletedAt: new Date().toISOString().slice(0, 10),
+    };
+    setAppData((prev) => ({
+      ...prev,
+      trash: [...prev.trash, item],
+      [flowKey]: (prev[flowKey] || []).filter((r) => r.id !== targetId),
+    }));
+  };
 
   const handleNavClick = (item) => {
     if (item.children) {
@@ -2044,65 +4075,109 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <StatCard
                   label="Bin utilization"
-                  value="74%"
-                  sub={{ pct: 74, text: "7,412 / 10,000" }}
+                  value={`${dashboardStats.utilization}%`}
+                  sub={{
+                    pct: dashboardStats.utilization,
+                    text: `${dashboardStats.occupiedBins} / ${dashboardStats.totalBins}`,
+                  }}
                   tone="primary"
+                  tooltip={[
+                    [
+                      "Fresh",
+                      dashboardStats.binsDetail?.fresh || 0,
+                      "#188A5A",
+                    ],
+                    [
+                      "Non-expiring",
+                      dashboardStats.binsDetail?.["non expiring"] || 0,
+                      "#2F6FED",
+                    ],
+                    [
+                      "Near expiry",
+                      dashboardStats.binsDetail?.["near expiry"] || 0,
+                      "#D23C3C",
+                    ],
+                    [
+                      "Expired",
+                      dashboardStats.binsDetail?.expired || 0,
+                      "#000000",
+                    ],
+                    [
+                      "Empty",
+                      dashboardStats.binsDetail?.empty || 0,
+                      "#E3E7EC",
+                    ],
+                  ]}
                 />
                 <StatCard
                   label="Pending inward QC"
-                  value="18"
+                  value={dashboardStats.pendingInwardQC}
                   sub={{ pct: 45, text: "lots waiting" }}
                   tone="warning"
                 />
                 <StatCard
                   label="Pending outward QC"
-                  value="9"
+                  value={dashboardStats.pendingOutwardQC}
                   sub={{ pct: 28, text: "lots waiting" }}
                   tone="warning"
                 />
                 <StatCard
                   label="Today's dispatches"
-                  value="32"
-                  sub={{ pct: 80, text: "of 40 planned" }}
+                  value={dashboardStats.dispatched}
+                  sub={{ pct: 80, text: "dispatched to date" }}
                   tone="success"
                 />
               </div>
 
-              <BinMap />
+              <BinMap bins={appData.bins} />
+
+              <StatCard
+                label="Product expiry"
+                value={`Fresh ${fresh}, Near ${near}, Expired ${expired}, Non‑expiring ${non}`}
+                sub={{ pct: total ? Math.round(((fresh + near + non) / total) * 100) : 0, text: `${total} total SKUs` }}
+                tone="primary"
+              />
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                 <Pipeline
                   title="Inward pipeline — today"
                   stages={[
-                    { label: "Gate Inward", count: 5, icon: Truck },
-                    { label: "Inward", count: 12, icon: ClipboardList },
+                    { label: "Pre Gate Inward", count: inwardCounts.preGateInward, icon: ClipboardList },
+                    { label: "Gate Inward", count: inwardCounts.gateInward, icon: Truck },
+                    { label: "Inward", count: inwardCounts.inward, icon: ClipboardList },
                     {
                       label: "Checklist Unloading",
-                      count: 8,
+                      count: inwardCounts.checklistUnloading,
                       icon: ClipboardCheck,
                     },
-                    { label: "Quality Check", count: 18, icon: PackageCheck },
-                    { label: "Good Receipt Note", count: 6, icon: FileCheck },
+                    { label: "Quality Check", count: inwardCounts.qualityCheck, icon: PackageCheck },
+                    { label: "Good Receipt Note", count: inwardCounts.goodReceiptNote, icon: FileCheck },
                   ]}
                 />
                 <Pipeline
                   title="Outward pipeline — today"
                   stages={[
-                    { label: "Pick List", count: 14, icon: ClipboardList },
-                    { label: "Pick", count: 10, icon: PackageCheck },
-                    { label: "QC Outward", count: 9, icon: ClipboardCheck },
+                    { label: "Pick List", count: outwardCounts.pickList, icon: ClipboardList },
+                    { label: "Pick", count: outwardCounts.pick, icon: PackageCheck },
+                    { label: "QC Outward", count: outwardCounts.qualityCheckOutward, icon: ClipboardCheck },
                     {
                       label: "Checklist Loading",
-                      count: 7,
+                      count: outwardCounts.checklistLoading,
                       icon: ClipboardList,
                     },
-                    { label: "Dispatch", count: 32, icon: Truck },
-                    { label: "Outward", count: 28, icon: FileCheck },
+                    { label: "Dispatch", count: outwardCounts.dispatch, icon: Truck },
+                    { label: "Outward", count: outwardCounts.outward, icon: FileCheck },
                   ]}
                 />
               </div>
 
-              <ActivityTable searchQuery={searchQuery} />
+              <ActivityTable
+                searchQuery={searchQuery}
+                inward={appData.inward}
+                outward={appData.outward}
+                inwardConsignments={appData.inwardConsignments}
+                outwardConsignments={appData.outwardConsignments}
+              />
             </div>
           )}
 
@@ -2113,38 +4188,19 @@ export default function App() {
               addLabel="Add Customer"
               globalSearch={searchQuery}
               columns={["Customer code", "Name", "GSTIN", "City", "Contact"]}
-              rows={[
-                [
-                  "CUST-0104",
-                  "Nimbus Retail Pvt Ltd",
-                  "27AAJCN1234K1ZP",
-                  "Pune",
-                  "+91 98220 11234",
-                ],
-                [
-                  "CUST-0098",
-                  "Aravali Foods",
-                  "08AAJCA5567H1Z9",
-                  "Jaipur",
-                  "+91 97290 88213",
-                ],
-                [
-                  "CUST-0112",
-                  "Meridian Textiles",
-                  "24AAJCM8890L1ZQ",
-                  "Surat",
-                  "+91 90990 44521",
-                ],
-                [
-                  "CUST-0071",
-                  "Orbit Hardware",
-                  "27AAJCO3321J1ZT",
-                  "Nashik",
-                  "+91 98811 22076",
-                ],
-              ]}
-              onAdd={() => openSimpleForm("Add Customer")}
-              onEdit={(row) => openSimpleForm(`Edit Customer — ${row[0]}`)}
+              rows={appData.customers.map((r) => [
+                r.id,
+                r.name,
+                r.gstin,
+                r.city,
+                r.contact,
+              ])}
+              reservedKeys={appData.trash
+                .filter((t) => t.collection === "customers")
+                .map((t) => t.record && t.record.id)}
+              onAdd={(row) => addMaster("customers", row)}
+              onEdit={(row, idx) => updateMaster("customers", row, idx)}
+              onDelete={(idx) => moveToTrash("customers", idx)}
             />
           )}
 
@@ -2160,15 +4216,24 @@ export default function App() {
                 "Category",
                 "Unit",
                 "Reorder level",
+                "Expiry date",
+                "Status",
               ]}
-              rows={[
-                ["SKU-0442", "Basmati Rice 25kg", "Grocery", "Bag", "200"],
-                ["SKU-0187", "Cotton Yarn Cone", "Textile", "Cone", "500"],
-                ["SKU-0925", "M8 Hex Bolt", "Hardware", "Box", "1000"],
-                ["SKU-0310", "Paracetamol 500mg", "Pharma", "Carton", "150"],
-              ]}
-              onAdd={() => openSimpleForm("Add Product")}
-              onEdit={(row) => openSimpleForm(`Edit Product — ${row[0]}`)}
+              rows={appData.products.map((p) => [
+                p.id,
+                p.name,
+                p.category,
+                p.unit,
+                String(p.reorderLevel),
+                p.expiryDate === "none" ? "Non-expiring" : p.expiryDate,
+                p.status,
+              ])}
+              reservedKeys={appData.trash
+                .filter((t) => t.collection === "products")
+                .map((t) => t.record && t.record.id)}
+              onAdd={(row) => addMaster("products", row)}
+              onEdit={(row, idx) => updateMaster("products", row, idx)}
+              onDelete={(idx) => moveToTrash("products", idx)}
             />
           )}
 
@@ -2179,31 +4244,19 @@ export default function App() {
               addLabel="Add Vendor"
               globalSearch={searchQuery}
               columns={["Vendor code", "Name", "GSTIN", "City", "Contact"]}
-              rows={[
-                [
-                  "VEND-0033",
-                  "Aravali Foods",
-                  "08AAJCA5567H1Z9",
-                  "Jaipur",
-                  "+91 97290 88213",
-                ],
-                [
-                  "VEND-0051",
-                  "Meridian Textiles Mills",
-                  "24AAJCM8890L1ZQ",
-                  "Surat",
-                  "+91 90990 44521",
-                ],
-                [
-                  "VEND-0018",
-                  "Precision Fasteners Co.",
-                  "27AAJCP2210F1ZR",
-                  "Aurangabad",
-                  "+91 96070 55182",
-                ],
-              ]}
-              onAdd={() => openSimpleForm("Add Vendor")}
-              onEdit={(row) => openSimpleForm(`Edit Vendor — ${row[0]}`)}
+              rows={appData.vendors.map((r) => [
+                r.id,
+                r.name,
+                r.gstin,
+                r.city,
+                r.contact,
+              ])}
+              reservedKeys={appData.trash
+                .filter((t) => t.collection === "vendors")
+                .map((t) => t.record && t.record.id)}
+              onAdd={(row) => addMaster("vendors", row)}
+              onEdit={(row, idx) => updateMaster("vendors", row, idx)}
+              onDelete={(idx) => moveToTrash("vendors", idx)}
             />
           )}
 
@@ -2214,14 +4267,19 @@ export default function App() {
               addLabel="Add Bin"
               globalSearch={searchQuery}
               columns={["Bin code", "Zone", "Capacity (units)", "Status"]}
-              rows={[
-                ["A-04-12", "Zone A", "120", "Occupied"],
-                ["B-11-02", "Zone B", "80", "Empty"],
-                ["C-07-19", "Zone C", "150", "QC hold"],
-                ["D-02-05", "Zone D", "100", "Blocked"],
-              ]}
-              onAdd={() => openSimpleForm("Add Bin Location")}
-              onEdit={(row) => openSimpleForm(`Edit Bin — ${row[0]}`)}
+              qrIndex={0}
+              rows={appData.locations.map((r) => [
+                r.code,
+                r.zone,
+                r.capacity,
+                r.status,
+              ])}
+              reservedKeys={appData.trash
+                .filter((t) => t.collection === "locations")
+                .map((t) => t.record && t.record.code)}
+              onAdd={(row) => addMaster("locations", row)}
+              onEdit={(row, idx) => updateMaster("locations", row, idx)}
+              onDelete={(idx) => moveToTrash("locations", idx)}
             />
           )}
 
@@ -2232,14 +4290,18 @@ export default function App() {
               addLabel="Add User"
               globalSearch={searchQuery}
               columns={["User ID", "Name", "Role", "Status"]}
-              rows={[
-                ["USR-011", "R. Deshpande", "Warehouse Manager", "Active"],
-                ["USR-024", "S. Kulkarni", "QC Inspector", "Active"],
-                ["USR-019", "A. Verma", "Gate Security", "Active"],
-                ["USR-032", "P. Shinde", "Picker", "Inactive"],
-              ]}
-              onAdd={() => openSimpleForm("Add User")}
-              onEdit={(row) => openSimpleForm(`Edit User — ${row[0]}`)}
+              rows={appData.users.map((r) => [
+                r.id,
+                r.name,
+                r.role,
+                r.status,
+              ])}
+              reservedKeys={appData.trash
+                .filter((t) => t.collection === "users")
+                .map((t) => t.record && t.record.id)}
+              onAdd={(row) => addMaster("users", row)}
+              onEdit={(row, idx) => updateMaster("users", row, idx)}
+              onDelete={(idx) => moveToTrash("users", idx)}
             />
           )}
 
@@ -2251,48 +4313,22 @@ export default function App() {
               stages={INWARD_STAGES}
               tone="inward"
               globalSearch={searchQuery}
-              rows={[
-                {
-                  docBase: "3021",
-                  party: "Nimbus Retail Pvt Ltd",
-                  ref: "MH12 AB 4432",
-                  step: 5,
-                  stageLabel: "Good Receipt Note",
-                  tone: "success",
-                },
-                {
-                  docBase: "1187",
-                  party: "Aravali Foods",
-                  ref: "RJ14 CT 8821",
-                  step: 1,
-                  stageLabel: "Gate Inward",
-                  tone: "muted",
-                },
-                {
-                  docBase: "0912",
-                  party: "Meridian Textiles",
-                  ref: "GJ05 XZ 1190",
-                  step: 4,
-                  stageLabel: "Quality Check",
-                  tone: "warning",
-                },
-                {
-                  docBase: "2244",
-                  party: "Orbit Hardware",
-                  ref: "MH04 EF 3390",
-                  step: 2,
-                  stageLabel: "Inward",
-                  tone: "primary",
-                },
-              ]}
+              rows={inwardRows}
               onAdd={() => openInwardForm(0, genBaseDoc())}
-              onOpenRow={(r, stepIdx) =>
+              onOpenRow={(r, stepIdx) => {
+                const rec = r.documentId
+                  ? appData.inward.find((x) => x.id === r.documentId)
+                  : null;
+                const stageIndex = stepIdx !== undefined ? stepIdx : (r.step && r.step - 1) || 0;
                 openInwardForm(
-                  stepIdx !== undefined ? stepIdx : r.step - 1,
+                  stageIndex,
                   r.docBase,
-                )
-              }
+                  r.documentId,
+                  recordToValues(rec, "inward"),
+                );
+              }}
               footnote="Outward follows the same structure across its six stages."
+              onDeleteRow={deleteConsignment}
             />
           )}
 
@@ -2304,48 +4340,22 @@ export default function App() {
               stages={OUTWARD_STAGES}
               tone="outward"
               globalSearch={searchQuery}
-              rows={[
-                {
-                  docBase: "3021",
-                  party: "Nimbus Retail Pvt Ltd",
-                  ref: "MH12 AB 4432",
-                  step: 6,
-                  stageLabel: "Outward",
-                  tone: "success",
-                },
-                {
-                  docBase: "1187",
-                  party: "Aravali Foods",
-                  ref: "RJ14 CT 8821",
-                  step: 2,
-                  stageLabel: "Pick",
-                  tone: "primary",
-                },
-                {
-                  docBase: "0912",
-                  party: "Meridian Textiles",
-                  ref: "GJ05 XZ 1190",
-                  step: 3,
-                  stageLabel: "Quality Check Outward",
-                  tone: "danger",
-                },
-                {
-                  docBase: "2244",
-                  party: "Orbit Hardware",
-                  ref: "MH04 EF 3390",
-                  step: 4,
-                  stageLabel: "Checklist Loading",
-                  tone: "warning",
-                },
-              ]}
+              rows={outwardRows}
               onAdd={() => openOutwardForm(0, genBaseDoc())}
-              onOpenRow={(r, stepIdx) =>
+              onOpenRow={(r, stepIdx) => {
+                const rec = r.documentId
+                  ? appData.outward.find((x) => x.id === r.documentId)
+                  : null;
+                const stageIndex = stepIdx !== undefined ? stepIdx : (r.step && r.step - 1) || 0;
                 openOutwardForm(
-                  stepIdx !== undefined ? stepIdx : r.step - 1,
+                  stageIndex,
                   r.docBase,
-                )
-              }
+                  r.documentId,
+                  recordToValues(rec, "outward"),
+                );
+              }}
               footnote="Inward mirrors this with its five stages."
+              onDeleteRow={deleteConsignment}
             />
           )}
 
@@ -2665,20 +4675,17 @@ export default function App() {
                   />
                 </div>
                 <div className="flex flex-col gap-4 pl-1">
-                  {[
-                    "Gate Inward — 8:10 AM",
-                    "Inward — 8:22 AM",
-                    "Checklist Unloading — 8:40 AM",
-                    "Quality Check — 9:05 AM",
-                    "Good Receipt Note — 9:30 AM",
-                  ].map((s, i, arr) => (
-                    <div key={s} className="flex items-center gap-3">
+                  {appData.trackTrace.map((step, idx) => (
+                    <div
+                      key={step.step || idx}
+                      className="flex items-center gap-3"
+                    >
                       <div className="flex flex-col items-center">
                         <span
                           style={{ background: c.primary }}
                           className="w-2.5 h-2.5 rounded-full"
                         />
-                        {i < arr.length - 1 && (
+                        {idx < appData.trackTrace.length - 1 && (
                           <span
                             style={{ background: c.border }}
                             className="w-px h-8"
@@ -2689,12 +4696,98 @@ export default function App() {
                         style={{ color: c.text }}
                         className="text-xs sm:text-sm"
                       >
-                        {s}
+                        {step.label || step.step} — {step.time}
                       </span>
                     </div>
                   ))}
                 </div>
               </div>
+            </div>
+          )}
+
+          {activePage === "recyclebin" && (
+            <div className="flex flex-col gap-4">
+              <h2
+                style={{ color: c.text }}
+                className="text-lg sm:text-xl font-semibold"
+              >
+                Recycle Bin
+              </h2>
+              <p style={{ color: c.muted }} className="text-xs sm:text-sm">
+                Deleted records are held here. Restore brings an item back; Delete
+                Permanently frees its name/code for reuse.
+              </p>
+              {appData.trash.length === 0 ? (
+                <div
+                  style={{ background: c.card, border: `1px solid ${c.border}` }}
+                  className="rounded-md p-8 text-center text-sm"
+                >
+                  <p style={{ color: c.muted }}>Recycle Bin is empty.</p>
+                </div>
+              ) : (
+                <div
+                  style={{ background: c.card, border: `1px solid ${c.border}` }}
+                  className="rounded-md overflow-hidden"
+                >
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs sm:text-sm border-collapse min-w-[520px]">
+                      <thead>
+                        <tr style={{ color: c.muted }} className="text-left">
+                          <th className="font-medium py-2 px-4">Section</th>
+                          <th className="font-medium py-2 px-4">Name / Code</th>
+                          <th className="font-medium py-2 px-4">Deleted on</th>
+                          <th className="font-medium py-2 px-4">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {appData.trash.map((item, i) => {
+                          const label =
+                            item.record &&
+                            (item.record.name ||
+                              item.record.id ||
+                              item.record.code ||
+                              "Unnamed");
+                          return (
+                            <tr
+                              key={i}
+                              style={{ borderTop: `1px solid ${c.border}` }}
+                            >
+                              <td
+                                className="py-3 px-4 capitalize"
+                                style={{ color: c.muted }}
+                              >
+                                {item.collection}
+                              </td>
+                              <td className="py-3 px-4 font-semibold" style={{ color: c.text }}>
+                                {label}
+                              </td>
+                              <td className="py-3 px-4" style={{ color: c.muted }}>
+                                {item.deletedAt}
+                              </td>
+                              <td className="py-3 px-4">
+                                <button
+                                  onClick={() => restoreFromTrash(i)}
+                                  style={{ color: c.primary }}
+                                  className="text-xs sm:text-sm font-medium hover:underline mr-3 inline-flex items-center gap-1"
+                                >
+                                  <RotateCcw size={14} /> Restore
+                                </button>
+                                <button
+                                  onClick={() => deletePermanently(i)}
+                                  style={{ color: c.danger }}
+                                  className="text-xs sm:text-sm font-medium hover:underline inline-flex items-center gap-1"
+                                >
+                                  <Trash2 size={14} /> Delete Permanently
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -2713,10 +4806,14 @@ export default function App() {
               onSave={saveForm}
               onSaveCopy={saveAndCopy}
               onStep={stepForm}
-              onSetStage={setStageForm}
               onMove={moveForm}
               onAddPhoto={addPhotoToForm}
               onRemovePhoto={removePhotoFromForm}
+              onAddChild={addChildForm}
+              onRemoveChild={removeChildForm}
+              onUpdateChild={updateChildForm}
+              onSaveChild={saveChildForm}
+              onToggleChild={toggleChildForm}
             />
           ))}
       </div>
