@@ -515,7 +515,8 @@ const STAGE_FIELDS = {
     {
       key: "putawayZone",
       label: "Target Bin / Rack Location",
-      placeholder: "Zone A - Bin A-04-12",
+      type: "select",
+      placeholder: "Scan a bin QR or choose a bin",
     },
     {
       key: "receivedBy",
@@ -838,7 +839,7 @@ function BinMap({ bins }) {
   const [tip, setTip] = useState(null); // { bin, productId, productName, status, category, expiryDate, x, y }
   const showTip = (entry, i, e) => {
     setTip({
-      bin: String(i + 1).padStart(2, "0"),
+      bin: entry && entry.bin ? entry.bin : String(i + 1).padStart(2, "0"),
       productId: entry && entry.productId,
       productName: entry && entry.productName,
       status: entry && entry.status ? entry.status : "empty",
@@ -890,7 +891,7 @@ function BinMap({ bins }) {
         style={{
           display: "grid",
           gridTemplateColumns: `repeat(${cols}, 1fr)`,
-          gap: 2,
+          gap: 3,
         }}
       >
         {cells.map((entry, i) => (
@@ -900,11 +901,30 @@ function BinMap({ bins }) {
             onMouseLeave={() => setTip(null)}
             style={{
               background: getColor(entry),
-              aspectRatio: "1 / 1",
-              borderRadius: 1,
+              aspectRatio: "16 / 10",
+              borderRadius: 2,
               cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "1px",
+              overflow: "hidden",
             }}
-          />
+            title={entry && entry.bin ? entry.bin : `Bin ${i + 1}`}
+          >
+            <span
+              style={{
+                color: entry === "empty" ? "#96A0AE" : "#ffffff",
+                fontSize: 6,
+                lineHeight: 1,
+                fontWeight: 600,
+                textAlign: "center",
+                wordBreak: "break-all",
+              }}
+            >
+              {entry && entry.bin ? entry.bin : "—"}
+            </span>
+          </div>
         ))}
       </div>
 
@@ -1643,7 +1663,7 @@ function TreeRow({
   const isStageSelected = selectedStep !== undefined && selectedStep === step - 1;
   const [labelOpen, setLabelOpen] = useState(null); // {type, value}
   const labelValue = node.documentId || node.id || "";
-  const isInwardRecord = node.flow === "inward" && node.step === 3;
+  const isInwardRecord = node.flow === "inward" && node.step === stages.length;
   const qrPayload = [
     labelValue,
     node.productName ? `Product: ${node.productName}` : "",
@@ -2471,6 +2491,7 @@ function FloatingForm({
   onUpdateChild,
   onSaveChild,
   onToggleChild,
+  binOptions = [],
 }) {
   const [showFields, setShowFields] = useState(
     !form.flowStages || form.stageIndex === 0,
@@ -2754,20 +2775,44 @@ function FloatingForm({
                 {f.label}
               </label>
               <div className="flex items-center gap-1">
-                <input
-                  type={f.type || "text"}
-                  value={
-                    form.values[`${stageLabel}_${f.key}`] ||
-                    form.values[f.key] ||
-                    ""
-                  }
-                  onChange={(e) =>
-                    onChange(form.id, `${stageLabel}_${f.key}`, e.target.value)
-                  }
-                  placeholder={f.type === "date" ? undefined : (f.placeholder || `Enter ${f.label.toLowerCase()}`)}
-                  style={{ borderColor: c.border, color: c.text }}
-                  className="flex-1 px-3 py-2.5 sm:py-2 rounded-md border text-sm outline-none focus:ring-2"
-                />
+                {f.type === "select" ? (
+                  <select
+                    value={
+                      form.values[`${stageLabel}_${f.key}`] ||
+                      form.values[f.key] ||
+                      ""
+                    }
+                    onChange={(e) =>
+                      onChange(form.id, `${stageLabel}_${f.key}`, e.target.value)
+                    }
+                    style={{ borderColor: c.border, color: c.text }}
+                    className="flex-1 px-3 py-2.5 sm:py-2 rounded-md border text-sm outline-none focus:ring-2 bg-white"
+                  >
+                    <option value="">
+                      {f.placeholder || `Select ${f.label.toLowerCase()}`}
+                    </option>
+                    {(f.options?.length ? f.options : binOptions).map((o) => (
+                      <option key={o} value={o}>
+                        {o}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type={f.type || "text"}
+                    value={
+                      form.values[`${stageLabel}_${f.key}`] ||
+                      form.values[f.key] ||
+                      ""
+                    }
+                    onChange={(e) =>
+                      onChange(form.id, `${stageLabel}_${f.key}`, e.target.value)
+                    }
+                    placeholder={f.type === "date" ? undefined : (f.placeholder || `Enter ${f.label.toLowerCase()}`)}
+                    style={{ borderColor: c.border, color: c.text }}
+                    className="flex-1 px-3 py-2.5 sm:py-2 rounded-md border text-sm outline-none focus:ring-2"
+                  />
+                )}
                 {(f.type !== "date") && (
                   <ScanInput
                     value={form.values[`${stageLabel}_${f.key}`] || form.values[f.key] || ""}
@@ -2803,7 +2848,7 @@ function FloatingForm({
             </div>
             {stageChildren.map((child) => {
           const childFields = STAGE_FIELDS[child.stageLabel] || currentFields;
-          const isInward = child.stageLabel === "Inward";
+          const isInward = child.stageLabel === "Good Receipt Note";
           const childQrPayload = [
             child.docId,
             child.values && child.values.productId ? `SKU: ${child.values.productId}` : "",
@@ -2861,15 +2906,34 @@ function FloatingForm({
                       {field.label}
                     </label>
                     <div className="flex items-center gap-1">
-                      <input
-                        type={field.type || "text"}
-                        value={child.values[field.key] || ""}
-                        onChange={(event) => onUpdateChild(form.id, child.id, field.key, event.target.value)}
-                        placeholder={field.type === "date" ? undefined : field.placeholder || `Enter ${field.label.toLowerCase()}`}
-                        disabled={child.saved}
-                        style={{ borderColor: c.border, color: c.text }}
-                        className="flex-1 px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 disabled:bg-gray-50 disabled:text-gray-500"
-                      />
+                      {field.type === "select" ? (
+                        <select
+                          value={child.values[field.key] || ""}
+                          onChange={(event) => onUpdateChild(form.id, child.id, field.key, event.target.value)}
+                          disabled={child.saved}
+                          style={{ borderColor: c.border, color: c.text }}
+                          className="flex-1 px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 disabled:bg-gray-50 disabled:text-gray-500 bg-white"
+                        >
+                          <option value="">
+                            {field.placeholder || `Select ${field.label.toLowerCase()}`}
+                          </option>
+                          {(field.options?.length ? field.options : binOptions).map((o) => (
+                            <option key={o} value={o}>
+                              {o}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          type={field.type || "text"}
+                          value={child.values[field.key] || ""}
+                          onChange={(event) => onUpdateChild(form.id, child.id, field.key, event.target.value)}
+                          placeholder={field.type === "date" ? undefined : field.placeholder || `Enter ${field.label.toLowerCase()}`}
+                          disabled={child.saved}
+                          style={{ borderColor: c.border, color: c.text }}
+                          className="flex-1 px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 disabled:bg-gray-50 disabled:text-gray-500"
+                        />
+                      )}
                       {(!child.saved && field.type !== "date") && (
                         <ScanInput
                           value={child.values[field.key] || ""}
@@ -3214,44 +3278,42 @@ export default function App() {
     return roots;
   }, [appData]);
 
-  const outwardRows = useMemo(
-    () =>
-      appData.outwardConsignments.map((c) => {
-        const stagesDone = appData.outward.filter(
-          (r) => r.commonNumber === c.commonNumber && r.status === "completed",
-        );
-        const cur = appData.outward.find(
-          (r) =>
-            r.commonNumber === c.commonNumber &&
-            r.type === OUT_TYPE_KEYS[c.currentStage - 1],
-        );
-        const currentOutStage =
-          cur || stagesDone[stagesDone.length - 1] || null;
-        const prod =
-          currentOutStage &&
-          currentOutStage.productId &&
-          appData.products.find((p) => p.id === currentOutStage.productId);
-        return {
-          docBase: c.id,
-          documentId: currentOutStage ? currentOutStage.id : null,
-          party: c.customer,
-          ref: c.vehicleNo || "—",
-          productName: prod ? prod.name : null,
-          productId: currentOutStage ? currentOutStage.productId || null : null,
-          binRef: currentOutStage ? currentOutStage.binRef || null : null,
-          step: c.currentStage,
-          stageLabel: currentOutStage
-            ? OUT_STAGE_META[c.currentStage - 1].label
-            : "",
-          tone:
-            c.currentStage >= OUT_TYPE_KEYS.length
-              ? "success"
-              : primaryForStep(c.currentStage),
-          flow: "outward",
-        };
-      }),
-    [appData],
-  );
+  const outwardRows = useMemo(() => {
+    const nodesById = {};
+    const byParent = {};
+    appData.outward.forEach((rec) => {
+      const typeMeta = OUT_STAGE_META.find((m) => m.key === rec.type);
+      const prod =
+        rec.productId &&
+        appData.products.find((p) => p.id === rec.productId);
+      nodesById[rec.id] = {
+        id: rec.id,
+        docBase: rec.rootId || rec.id,
+        documentId: rec.id,
+        party: rec.customer || "—",
+        ref: rec.vehicleNo || "—",
+        productName: prod ? prod.name : null,
+        productId: rec.productId || null,
+        binRef: rec.binRef || null,
+        step: typeMeta ? OUT_STAGE_META.indexOf(typeMeta) + 1 : 1,
+        stageLabel: typeMeta ? typeMeta.label : rec.type,
+        tone:
+          rec.status === "completed"
+            ? "success"
+            : primaryForStep((typeMeta ? OUT_STAGE_META.indexOf(typeMeta) : 0) + 1),
+        flow: "outward",
+        children: [],
+      };
+      const parentKey = rec.parentId || "__root__";
+      (byParent[parentKey] = byParent[parentKey] || []).push(rec.id);
+    });
+    appData.outward.forEach((rec) => {
+      const kids = byParent[rec.id] || [];
+      nodesById[rec.id].children = kids.map((id) => nodesById[id]);
+    });
+    const roots = (byParent["__root__"] || []).map((id) => nodesById[id]);
+    return roots;
+  }, [appData]);
 
   // Dashboard summary stats computed from real data
   const dashboardStats = useMemo(() => {
@@ -4263,7 +4325,7 @@ export default function App() {
           {activePage === "masters-locations" && (
             <CrudPage
               title="Bin Locations"
-              note="Generated from the 10 × 10 sqft grid across the floor — 10,000 bins in total."
+              note="Generated from the 10 × 6 bin grid across zones A–D — bins are named {Zone}-{Row}-{Col} and sourced from Inward GRN putaway."
               addLabel="Add Bin"
               globalSearch={searchQuery}
               columns={["Bin code", "Zone", "Capacity (units)", "Status"]}
@@ -4374,35 +4436,15 @@ export default function App() {
                 "Flow",
                 "Status",
               ]}
-              rows={[
-                [
-                  "BILL-3021",
-                  "Nimbus Retail Pvt Ltd",
-                  "GRN-3021",
-                  "₹18,400",
-                  "02 Sep 2026",
-                  "Inward",
-                  "Paid",
-                ],
-                [
-                  "BILL-1187",
-                  "Aravali Foods",
-                  "OUT-DSP-1187",
-                  "₹9,750",
-                  "01 Sep 2026",
-                  "Outward",
-                  "Pending",
-                ],
-                [
-                  "BILL-0912",
-                  "Meridian Textiles",
-                  "QC-OUT-0912",
-                  "₹4,200",
-                  "28 Aug 2026",
-                  "Outward",
-                  "Draft",
-                ],
-              ]}
+              rows={appData.bills.map((b) => [
+                b.billNo,
+                b.customer,
+                b.linkedDoc,
+                b.amount,
+                b.date,
+                b.flow,
+                b.status,
+              ])}
               onAdd={() => openSimpleForm("New Bill", "simple", true, {}, STAGE_FIELDS["Bill"])}
               onEdit={(row) =>
                 openSimpleForm(`Edit Bill — ${row[0]}`, "simple", true, { amount: row[3], date: row[4], flow: row[5], customer: row[1] }, STAGE_FIELDS["Bill"])
@@ -4675,31 +4717,165 @@ export default function App() {
                   />
                 </div>
                 <div className="flex flex-col gap-4 pl-1">
-                  {appData.trackTrace.map((step, idx) => (
-                    <div
-                      key={step.step || idx}
-                      className="flex items-center gap-3"
-                    >
-                      <div className="flex flex-col items-center">
-                        <span
-                          style={{ background: c.primary }}
-                          className="w-2.5 h-2.5 rounded-full"
-                        />
-                        {idx < appData.trackTrace.length - 1 && (
-                          <span
-                            style={{ background: c.border }}
-                            className="w-px h-8"
-                          />
-                        )}
-                      </div>
-                      <span
-                        style={{ color: c.text }}
-                        className="text-xs sm:text-sm"
-                      >
-                        {step.label || step.step} — {step.time}
-                      </span>
-                    </div>
-                  ))}
+                  {(() => {
+                    const q = searchQuery.trim().toLowerCase();
+                    if (!q) {
+                      return (
+                        <p style={{ color: c.muted }} className="text-sm">
+                          Enter a GRN, batch no., or document number to trace its
+                          full journey and linked bill.
+                        </p>
+                      );
+                    }
+                    // Resolve the query to a document + join billing by the
+                    // SAME primary key (commonNumber).
+                    const bill = appData.bills.find(
+                      (b) =>
+                        b.billNo.toLowerCase().includes(q) ||
+                        b.linkedDoc.toLowerCase().includes(q) ||
+                        b.commonNumber.toLowerCase().includes(q),
+                    );
+                    const ba = bill ? bill.commonNumber : null;
+                    const resolveIn = (coll, m) =>
+                      coll
+                        .filter(
+                          (r) =>
+                            r.id.toLowerCase().includes(q) ||
+                            (ba
+                              ? r.commonNumber === ba
+                              : r.commonNumber.toLowerCase().includes(q)),
+                        )
+                        .sort(
+                          (a, b) =>
+                            m.findIndex((x) => x.key === a.type) -
+                            m.findIndex((x) => x.key === b.type),
+                        );
+                    // Pick the collection by the matched flow (bill), else guess
+                    // from which of the two collections actually matches.
+                    const outCand = bill && bill.flow !== "Outward" ? [] : resolveIn(appData.outward, OUT_STAGE_META);
+                    const inCand = bill && bill.flow === "Outward" ? [] : resolveIn(appData.inward, IN_STAGE_META);
+                    const useOutward = bill ? bill.flow === "Outward" : outCand.length > 0;
+                    const meta = useOutward ? OUT_STAGE_META : IN_STAGE_META;
+                    const raw = useOutward ? outCand : inCand;
+                    // one step per stage (a batch has many child records per stage)
+                    const seenType = new Set();
+                    const resolved = raw.filter((r) => {
+                      if (seenType.has(r.type)) return false;
+                      seenType.add(r.type);
+                      return true;
+                    });
+                    if (!resolved.length) {
+                      return (
+                        <p style={{ color: c.muted }} className="text-sm">
+                          No document matches “{searchQuery}”. Try a GRN number
+                          like “GRN-188” or a batch like “CN-IN-057”.
+                        </p>
+                      );
+                    }
+                    const last = resolved[resolved.length - 1];
+                    const prod =
+                      last.productId &&
+                      appData.products.find((p) => p.id === last.productId);
+                    const flow = resolved[0] && resolved[0].type.includes("preGate") ? "Inward" : "Outward";
+                    return (
+                      <>
+                        <div
+                          className="rounded-md border p-3"
+                          style={{ borderColor: c.border }}
+                        >
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <div>
+                              <div style={{ color: c.muted }} className="text-[10px] font-semibold uppercase tracking-wider">
+                                {flow} · {resolved[0].commonNumber}
+                              </div>
+                              <div style={{ color: c.text }} className="text-sm font-semibold">
+                                {prod ? prod.name : "—"}
+                                {last.binRef ? ` → ${last.binRef}` : ""}
+                              </div>
+                            </div>
+                            <span
+                              className="text-[10px] font-bold uppercase px-2 py-0.5 rounded"
+                              style={{
+                                background:
+                                  flow === "Inward"
+                                    ? `${c.primary}1A`
+                                    : "#7C3AED1A",
+                                color: flow === "Inward" ? c.primary : "#7C3AED",
+                              }}
+                            >
+                              {flow}
+                            </span>
+                          </div>
+                          {bill && (
+                            <div
+                              className="mt-2 pt-2 text-xs"
+                              style={{ borderTop: `1px solid ${c.border}`, color: c.muted }}
+                            >
+                              <span className="font-semibold" style={{ color: c.text }}>
+                                {bill.billNo}
+                              </span>{" "}
+                              · {bill.amount} · {bill.date} ·{" "}
+                              <span
+                                className="font-medium"
+                                style={{
+                                  color:
+                                    bill.status === "Paid"
+                                      ? "#16A34A"
+                                      : bill.status === "Pending"
+                                        ? "#D97706"
+                                        : c.muted,
+                                }}
+                              >
+                                {bill.status}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                        {resolved.map((step, idx) => {
+                          const m = meta.find((x) => x.key === step.type);
+                          const done = step.status === "completed";
+                          return (
+                            <div key={step.id} className="flex items-center gap-3">
+                              <div className="flex flex-col items-center">
+                                <span
+                                  className="w-2.5 h-2.5 rounded-full"
+                                  style={{
+                                    background: done ? "#16A34A" : c.faint,
+                                  }}
+                                />
+                                {idx < resolved.length - 1 && (
+                                  <span
+                                    style={{ background: c.border }}
+                                    className="w-px h-8"
+                                  />
+                                )}
+                              </div>
+                              <div className="flex flex-col">
+                                <span
+                                  style={{ color: c.text }}
+                                  className="text-xs sm:text-sm font-medium"
+                                >
+                                  {m ? m.label : step.type}
+                                  <span
+                                    className="ml-2 text-[10px] font-bold uppercase"
+                                    style={{ color: done ? "#16A34A" : c.faint }}
+                                  >
+                                    {done ? "Done" : "Pending"}
+                                  </span>
+                                </span>
+                                <span
+                                  style={{ color: c.muted }}
+                                  className="text-[11px]"
+                                >
+                                  {step.id} · {step.createdAt}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -4814,6 +4990,7 @@ export default function App() {
               onUpdateChild={updateChildForm}
               onSaveChild={saveChildForm}
               onToggleChild={toggleChildForm}
+              binOptions={appData.binsList || []}
             />
           ))}
       </div>
