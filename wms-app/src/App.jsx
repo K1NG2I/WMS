@@ -1264,6 +1264,7 @@ function CrudPage({
   reservedKeys = [],
   globalSearch = "",
   qrIndex = -1,
+  floating = false,
 }) {
   const [error, setError] = useState("");
 
@@ -1309,11 +1310,19 @@ function CrudPage({
     );
 
   const openAdd = () => {
+    if (floating) {
+      if (onAdd) onAdd();
+      return;
+    }
     setError("");
     setModal({ mode: "add", index: null, values: columns.map(() => "") });
   };
 
   const openEdit = (row, index) => {
+    if (floating) {
+      if (onEdit) onEdit(row, index);
+      return;
+    }
     setError("");
     setModal({ mode: "edit", index, values: [...row] });
   };
@@ -2517,6 +2526,7 @@ function FloatingForm({
   onUpdateChild,
   onSaveChild,
   onToggleChild,
+  error,
   binOptions = [],
 }) {
   const [showFields, setShowFields] = useState(
@@ -3127,6 +3137,14 @@ function FloatingForm({
         )}
       </div>
 
+{error && (
+  <div className="px-4 pb-1">
+    <p style={{ color: c.danger }} className="text-xs font-medium">
+      {error}
+    </p>
+  </div>
+)}
+
 <div
   className="px-4 py-3 pb-20 md:pb-3 flex items-center justify-end gap-2"
   style={{ borderTop: `1px solid ${c.border}`, background: c.card }}
@@ -3679,6 +3697,7 @@ export default function App() {
   const [activePage, setActivePage] = useState("dashboard");
   const [searchQuery, setSearchQuery] = useState("");
   const [forms, setForms] = useState([]);
+  const [formError, setFormError] = useState("");
   const [appData, setAppData] = useState(initialAppData);
   const [savedWorkflowRows, setSavedWorkflowRows] = useState([]);
   const [detail, setDetail] = useState(null);
@@ -3841,6 +3860,7 @@ export default function App() {
   }, [appData]);
 
   const openForm = (config) => {
+    setFormError("");
     idRef.current += 1;
     zRef.current += 1;
     const idx = cascadeRef.current % 6;
@@ -3874,12 +3894,14 @@ export default function App() {
     zRef.current += 1;
     updateForm(id, { zIndex: zRef.current });
   };
-  const changeField = (id, key, val) =>
+  const changeField = (id, key, val) => {
+    if (formError) setFormError("");
     setForms((prev) =>
       prev.map((f) =>
         f.id === id ? { ...f, values: { ...f.values, [key]: val } } : f,
       ),
     );
+  };
 
   const addChildForm = (parentId) =>
     setForms((previousForms) =>
@@ -4031,6 +4053,56 @@ export default function App() {
   const saveForm = (id) => {
     const form = forms.find((f) => f.id === id);
     if (!form) return;
+
+    // Masters floating form: commit to the collection with validation.
+    if (form.collection && MASTER_FORM_FIELDS[form.collection]) {
+      const fieldDefs = MASTER_FORM_FIELDS[form.collection];
+      const raw = form.values || {};
+      const record = {};
+      fieldDefs.forEach((fd) => {
+        record[fd.key] = String(
+          raw[`${form.title}_${fd.key}`] ?? raw[fd.key] ?? "",
+        ).trim();
+      });
+      const keyField = fieldDefs[0].key;
+      const list = appData[form.collection] || [];
+      const isEdit = form.editIndex >= 0 && form.editIndex < list.length;
+
+      if (!record[keyField]) {
+        setFormError(`Please enter a ${fieldDefs[0].label.toLowerCase()}.`);
+        return;
+      }
+      const reserved = (appData.trash || [])
+        .filter((t) => t.collection === form.collection)
+        .map((t) => t.record && t.record[keyField]);
+      const dup = list.some(
+        (r, i) =>
+          i !== form.editIndex &&
+          String(r[keyField]).toLowerCase() === record[keyField].toLowerCase(),
+      );
+      const isReserved = reserved.some(
+        (k) => String(k).toLowerCase() === record[keyField].toLowerCase(),
+      );
+      if (dup || isReserved) {
+        setFormError(
+          isReserved
+            ? `"${record[keyField]}" is in the Recycle Bin and cannot be reused until permanently deleted.`
+            : `Duplicate ${fieldDefs[0].label.toLowerCase()} "${record[keyField]}" already exists.`,
+        );
+        return;
+      }
+
+      setAppData((prev) => ({
+        ...prev,
+        [form.collection]: isEdit
+          ? prev[form.collection].map((r, i) => (i === form.editIndex ? record : r))
+          : [...(prev[form.collection] || []), record],
+      }));
+      setFormError("");
+      closeForm(id);
+      return;
+    }
+
     const values = form.values || {};
     const collection = form.tone && form.tone.includes("inward") ? "inward" : "outward";
 
@@ -4114,19 +4186,57 @@ export default function App() {
     const f = forms.find((x) => x.id === id);
     if (!f) return;
     closeForm(id);
+    const next = { ...f.values };
+    if (f.collection && MASTER_FORM_FIELDS[f.collection]) {
+      // Fold prefixed editable values back to plain keys so the copied form
+      // starts fresh as a NEW record instead of reusing the edit's title.
+      MASTER_FORM_FIELDS[f.collection].forEach((fd) => {
+        const prefixed = next[`${f.title}_${fd.key}`];
+        if (prefixed != null) {
+          next[fd.key] = prefixed;
+          delete next[`${f.title}_${fd.key}`];
+        }
+      });
+    }
     openForm({
       kind: f.kind,
-      title: f.title,
+      title: f.collection ? `New ${MASTER_LABELS[f.collection]}` : f.title,
       tone: f.tone,
+      hidePhoto: f.hidePhoto,
+      fields: f.fields,
+      collection: f.collection,
+      editIndex: -1,
       flowStages: f.flowStages,
       stageIndex: f.flowStages ? f.stageIndex : undefined,
       docBase: f.flowStages ? genBaseDoc() : undefined,
-      values: { ...f.values },
+      values: next,
     });
   };
 
   const openSimpleForm = (title, tone = "simple", hidePhoto = false, initialValues = {}, fields = null) =>
     openForm({ kind: "simple", title, tone, hidePhoto, values: initialValues, fields });
+
+  // Open a draggable/minimizable floating form for a Master's add or edit.
+  // Values are prefilled from the live appData record (by index) for edits.
+  const openMasterForm = (collection, index = -1) => {
+    const fields = MASTER_FORM_FIELDS[collection] || [];
+    const list = appData[collection] || [];
+    const rec = index >= 0 && index < list.length ? list[index] : null;
+    const values = {};
+    if (rec) fields.forEach((f) => { values[f.key] = rec[f.key] != null ? rec[f.key] : ""; });
+    openForm({
+      kind: "simple",
+      title: rec
+        ? `Edit ${MASTER_LABELS[collection]} — ${rec[fields[0].key] || ""}`
+        : `New ${MASTER_LABELS[collection]}`,
+      tone: "simple",
+      collection,
+      editIndex: index,
+      hidePhoto: true,
+      fields,
+      values,
+    });
+  };
 
   // Build form values from an existing stage record, keeping only fields that
   // the current stage's form can edit (so JSON data round-trips correctly).
@@ -4224,36 +4334,52 @@ export default function App() {
     });
 
   // Masters CRUD -> persistent appData + soft-delete via Recycle Bin.
-  const MASTER_FIELDS = {
-    customers: ["id", "name", "gstin", "city", "contact"],
-    products: ["id", "name", "category", "unit", "reorderLevel", "expiryDate", "status"],
-    vendors: ["id", "name", "gstin", "city", "contact"],
-    locations: ["code", "zone", "capacity", "status"],
-    users: ["id", "name", "role", "status"],
+  const MASTER_LABELS = {
+    customers: "Customer",
+    products: "Product",
+    vendors: "Vendor",
+    locations: "Bin",
+    users: "User",
   };
 
-  const addMaster = (collection, row) =>
-    setAppData((prev) => {
-      const fields = MASTER_FIELDS[collection] || [];
-      const record = {};
-      fields.forEach((k, i) => {
-        record[k] = row[i] !== undefined ? row[i] : "";
-      });
-      return { ...prev, [collection]: [...(prev[collection] || []), record] };
-    });
-
-  const updateMaster = (collection, row, index) =>
-    setAppData((prev) => {
-      const fields = MASTER_FIELDS[collection] || [];
-      const record = {};
-      fields.forEach((k, i) => {
-        record[k] = row[i] !== undefined ? row[i] : "";
-      });
-      const list = prev[collection] || [];
-      const idx = index >= 0 && index < list.length ? index : -1;
-      const updated = list.map((r, i) => (i === idx ? record : r));
-      return { ...prev, [collection]: updated };
-    });
+  // Labels + input types for the floating add/edit forms on Masters pages.
+  const MASTER_FORM_FIELDS = {
+    customers: [
+      { key: "id", label: "Customer code", placeholder: "e.g. CUST-001" },
+      { key: "name", label: "Name" },
+      { key: "gstin", label: "GSTIN" },
+      { key: "city", label: "City" },
+      { key: "contact", label: "Contact" },
+    ],
+    products: [
+      { key: "id", label: "SKU code", placeholder: "e.g. SKU-001" },
+      { key: "name", label: "Product name" },
+      { key: "category", label: "Category", type: "select", options: ["Grocery","Textile","Hardware","Pharma","Electronics","Accessories","Home","Sports","Health","Chemical","Automotive","Stationery"] },
+      { key: "unit", label: "Unit", type: "select", options: ["Bag","Cone","Box","Carton","Pack","Bottle","Can","Jar","Piece","Meter","Spool","Set","Kit","Roll","Tube","Litre","Ream"] },
+      { key: "reorderLevel", label: "Reorder level" },
+      { key: "expiryDate", label: "Expiry date", type: "date" },
+      { key: "status", label: "Status", type: "select", options: ["fresh","near expiry","expired","non expiring"] },
+    ],
+    vendors: [
+      { key: "id", label: "Vendor code", placeholder: "e.g. VEN-001" },
+      { key: "name", label: "Name" },
+      { key: "gstin", label: "GSTIN" },
+      { key: "city", label: "City" },
+      { key: "contact", label: "Contact" },
+    ],
+    locations: [
+      { key: "code", label: "Bin code", placeholder: "e.g. A-01-01" },
+      { key: "zone", label: "Zone", type: "select", options: ["Zone A · Row 1","Zone A · Row 2","Zone B · Row 3","Zone C · Row 4","Zone D · Row 5","Zone D · Row 6"] },
+      { key: "capacity", label: "Capacity (units)" },
+      { key: "status", label: "Status", type: "select", options: ["Empty","Occupied"] },
+    ],
+    users: [
+      { key: "id", label: "User ID" },
+      { key: "name", label: "Name" },
+      { key: "role", label: "Role", type: "select", options: ["Warehouse Manager","QC Inspector","Gate Security","Picker"] },
+      { key: "status", label: "Status", type: "select", options: ["Active","Inactive"] },
+    ],
+  };
 
   const moveToTrash = (collection, index) =>
     setAppData((prev) => {
@@ -4869,6 +4995,7 @@ export default function App() {
               title="Customers"
               note="Same list-and-edit pattern applies across every Masters screen."
               addLabel="Add Customer"
+              floating
               globalSearch={searchQuery}
               columns={["Customer code", "Name", "GSTIN", "City", "Contact"]}
               rows={appData.customers.map((r) => [
@@ -4881,8 +5008,8 @@ export default function App() {
               reservedKeys={appData.trash
                 .filter((t) => t.collection === "customers")
                 .map((t) => t.record && t.record.id)}
-              onAdd={(row) => addMaster("customers", row)}
-              onEdit={(row, idx) => updateMaster("customers", row, idx)}
+              onAdd={() => openMasterForm("customers")}
+              onEdit={(row, idx) => openMasterForm("customers", idx)}
               onDelete={(idx) => moveToTrash("customers", idx)}
             />
           )}
@@ -4892,6 +5019,7 @@ export default function App() {
               title="Products"
               note="Every SKU stored in the warehouse is registered here before it can appear on any Inward or Outward document."
               addLabel="Add Product"
+              floating
               globalSearch={searchQuery}
               columns={[
                 "SKU code",
@@ -4914,8 +5042,8 @@ export default function App() {
               reservedKeys={appData.trash
                 .filter((t) => t.collection === "products")
                 .map((t) => t.record && t.record.id)}
-              onAdd={(row) => addMaster("products", row)}
-              onEdit={(row, idx) => updateMaster("products", row, idx)}
+              onAdd={() => openMasterForm("products")}
+              onEdit={(row, idx) => openMasterForm("products", idx)}
               onDelete={(idx) => moveToTrash("products", idx)}
             />
           )}
@@ -4925,6 +5053,7 @@ export default function App() {
               title="Vendors"
               note="Vendors are linked to every Gate Inward entry so goods can be traced back to source."
               addLabel="Add Vendor"
+              floating
               globalSearch={searchQuery}
               columns={["Vendor code", "Name", "GSTIN", "City", "Contact"]}
               rows={appData.vendors.map((r) => [
@@ -4937,8 +5066,8 @@ export default function App() {
               reservedKeys={appData.trash
                 .filter((t) => t.collection === "vendors")
                 .map((t) => t.record && t.record.id)}
-              onAdd={(row) => addMaster("vendors", row)}
-              onEdit={(row, idx) => updateMaster("vendors", row, idx)}
+              onAdd={() => openMasterForm("vendors")}
+              onEdit={(row, idx) => openMasterForm("vendors", idx)}
               onDelete={(idx) => moveToTrash("vendors", idx)}
             />
           )}
@@ -4948,6 +5077,7 @@ export default function App() {
               title="Bin Locations"
               note="Generated from the 10 × 6 bin grid across zones A–D — bins are named {Zone}-{Row}-{Col} and sourced from Inward GRN putaway."
               addLabel="Add Bin"
+              floating
               globalSearch={searchQuery}
               columns={["Bin code", "Zone", "Capacity (units)", "Status"]}
               qrIndex={0}
@@ -4960,8 +5090,8 @@ export default function App() {
               reservedKeys={appData.trash
                 .filter((t) => t.collection === "locations")
                 .map((t) => t.record && t.record.code)}
-              onAdd={(row) => addMaster("locations", row)}
-              onEdit={(row, idx) => updateMaster("locations", row, idx)}
+              onAdd={() => openMasterForm("locations")}
+              onEdit={(row, idx) => openMasterForm("locations", idx)}
               onDelete={(idx) => moveToTrash("locations", idx)}
             />
           )}
@@ -4971,6 +5101,7 @@ export default function App() {
               title="Users"
               note="Controls who can act at each stage — for example, only QC staff can clear Quality Checks."
               addLabel="Add User"
+              floating
               globalSearch={searchQuery}
               columns={["User ID", "Name", "Role", "Status"]}
               rows={appData.users.map((r) => [
@@ -4982,8 +5113,8 @@ export default function App() {
               reservedKeys={appData.trash
                 .filter((t) => t.collection === "users")
                 .map((t) => t.record && t.record.id)}
-              onAdd={(row) => addMaster("users", row)}
-              onEdit={(row, idx) => updateMaster("users", row, idx)}
+              onAdd={() => openMasterForm("users")}
+              onEdit={(row, idx) => openMasterForm("users", idx)}
               onDelete={(idx) => moveToTrash("users", idx)}
             />
           )}
@@ -5625,6 +5756,7 @@ export default function App() {
               onUpdateChild={updateChildForm}
               onSaveChild={saveChildForm}
               onToggleChild={toggleChildForm}
+              error={formError}
               binOptions={appData.binsList || []}
             />
           ))}
