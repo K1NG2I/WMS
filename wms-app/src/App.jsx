@@ -3275,6 +3275,85 @@ function DetailModal({ title, subtitle, columns, rows, linkLabel, onLink, onClos
   );
 }
 
+function SearchableSelect({ options, value, onChange, placeholder, label }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(value);
+  useEffect(() => setQuery(value), [value]);
+  const filtered = options
+    .filter((o) => o.toLowerCase().includes(query.toLowerCase()))
+    .slice(0, 50);
+  const select = (o) => {
+    onChange(o);
+    setQuery(o);
+    setOpen(false);
+  };
+  return (
+    <div className="relative flex flex-col gap-1 flex-1 min-w-[0]">
+      {label && (
+        <span style={{ color: c.muted }} className="text-[11px] font-medium">
+          {label}
+        </span>
+      )}
+      <div className="relative">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 130)}
+          placeholder={placeholder}
+          style={{ borderColor: c.border, color: c.text }}
+          className="w-full px-3 py-2 pr-8 rounded-md border text-sm outline-none focus:ring-2"
+        />
+        {query && (
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setQuery("");
+              onChange("");
+              setOpen(true);
+            }}
+            style={{ color: c.faint }}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-gray-100"
+            title="Clear"
+          >
+            <X size={14} />
+          </button>
+        )}
+      </div>
+      {open && (
+        <div
+          style={{ background: "#fff", border: `1px solid ${c.border}`, boxShadow: "0 8px 24px rgba(0,0,0,0.12)" }}
+          className="absolute z-40 mt-1 w-full max-h-56 overflow-auto rounded-md border"
+        >
+          {filtered.length ? (
+            filtered.map((o) => (
+              <button
+                key={o}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => select(o)}
+                style={{ color: c.text }}
+                className="block w-full text-left px-3 py-1.5 text-xs hover:bg-gray-100"
+              >
+                {o}
+              </button>
+            ))
+          ) : (
+            <div style={{ color: c.muted }} className="px-3 py-2 text-xs">
+              No matches
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReportsPage({ appData }) {
   const [tab, setTab] = useState("inventory");
   const [fromDate, setFromDate] = useState("");
@@ -3566,34 +3645,20 @@ function ReportsPage({ appData }) {
             className="px-3 py-2 rounded-md border text-sm outline-none focus:ring-2"
           />
         </div>
-        <div className="flex flex-col gap-1 lg:min-w-[220px] flex-1">
-          <label style={{ color: c.muted }} className="text-[11px] font-medium">Client / Party</label>
-          <select
-            value={party}
-            onChange={(e) => setParty(e.target.value)}
-            style={{ borderColor: c.border, color: c.text }}
-            className="px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 bg-white"
-          >
-            <option value="">All clients / parties</option>
-            {partyOptions.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-        </div>
-        <div className="flex flex-col gap-1 lg:min-w-[220px] flex-1">
-          <label style={{ color: c.muted }} className="text-[11px] font-medium">Product</label>
-          <select
-            value={product}
-            onChange={(e) => setProduct(e.target.value)}
-            style={{ borderColor: c.border, color: c.text }}
-            className="px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 bg-white"
-          >
-            <option value="">All products</option>
-            {productOptions.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-        </div>
+        <SearchableSelect
+          options={partyOptions}
+          value={party}
+          onChange={setParty}
+          placeholder="Type to search client / party"
+          label="Client / Party"
+        />
+        <SearchableSelect
+          options={productOptions}
+          value={product}
+          onChange={setProduct}
+          placeholder="Type to search product"
+          label="Product"
+        />
         <button
           onClick={resetFilters}
           style={{ color: hasFilters ? c.danger : c.faint, borderColor: hasFilters ? c.danger : c.border }}
