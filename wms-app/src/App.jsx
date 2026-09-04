@@ -3527,22 +3527,17 @@ export default function App() {
   }, [appData.inward]);
 
   const outwardCounts = useMemo(() => {
-    const acc = {
-      pickList: 0,
-      pick: 0,
-      qualityCheckOutward: 0,
-      checklistLoading: 0,
-      dispatch: 0,
-      outward: 0,
-    };
-    appData.outwardConsignments.forEach((c) => {
-      const stage = c.currentStage || 0;
-      OUT_TYPE_KEYS.forEach((key, idx) => {
-        if (stage >= idx + 1) acc[key]++;
-      });
+    const acc = Object.fromEntries(OUT_TYPE_KEYS.map((k) => [k, 0]));
+    const byType = { pickList: 0, pick: 0, qualityCheckOutward: 0, checklistLoading: 0, dispatch: 0, outward: 0 };
+    appData.outward.forEach((r) => {
+      if (r.status === "completed" && byType[r.type] !== undefined) byType[r.type]++;
+    });
+    OUT_TYPE_KEYS.forEach((key, idx) => {
+      // funnel: records at this stage or deeper
+      for (let j = idx; j < OUT_TYPE_KEYS.length; j++) acc[OUT_TYPE_KEYS[j]] += byType[key];
     });
     return acc;
-  }, [appData.outwardConsignments]);
+  }, [appData.outward]);
 
   // Derived lists for tables from real data
   // Build the inward flow as a tree keyed by parentId, rooted at PreGateInward.
