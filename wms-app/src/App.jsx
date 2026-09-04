@@ -34,7 +34,6 @@ import {
   QrCode,
   Barcode,
   BarChart3,
-  FileText,
   ExternalLink,
 } from "lucide-react";
 import initialAppData from "./data/appData.json";
@@ -3278,6 +3277,10 @@ function DetailModal({ title, subtitle, columns, rows, linkLabel, onLink, onClos
 
 function ReportsPage({ appData }) {
   const [tab, setTab] = useState("inventory");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [party, setParty] = useState("");
+  const [product, setProduct] = useState("");
   const tabs = [
     { id: "inventory", label: "Inventory" },
     { id: "inbound", label: "Inbound (GRN)" },
@@ -3287,15 +3290,76 @@ function ReportsPage({ appData }) {
   ];
 
   const binCells = appData.bins.cells;
-  const occupied = binCells.filter((c) => c !== "empty");
-  const occupiedBins = occupied.length;
-  const totalBins = binCells.length;
-  const utilization = totalBins ? Math.round((occupiedBins / totalBins) * 100) : 0;
   const grns = appData.inward.filter((r) => r.type === "goodReceiptNote");
   const dispatched = appData.outward.filter((r) => r.type === "outward");
 
+  const partyOptions = [
+    ...new Set(
+      [
+        ...appData.customers.map((c) => c.name),
+        ...appData.vendors.map((v) => v.name),
+      ].filter(Boolean),
+    ),
+  ].sort();
+  const productOptions = appData.products.map((p) => p.name).filter(Boolean);
+  const productIdByName = (name) => {
+    const p = appData.products.find((x) => x.name === name);
+    return p ? p.id : null;
+  };
+
+  const inRange = (ds) => {
+    if (!ds) return true;
+    const d = String(ds).slice(0, 10);
+    if (fromDate && d < fromDate) return false;
+    if (toDate && d > toDate) return false;
+    return true;
+  };
+  const partyMatch = (vals) => {
+    if (!party) return true;
+    const list = (Array.isArray(vals) ? vals : [vals]).map((v) => String(v || ""));
+    return list.some((v) => v.toLowerCase().includes(party.toLowerCase()));
+  };
+  const productMatch = (productId) => {
+    if (!product) return true;
+    return productId === productIdByName(product);
+  };
+
+  const filteredGrns = grns.filter((r) => {
+    const p = appData.products.find((x) => x.id === r.productId);
+    return (
+      inRange(r.createdAt) &&
+      partyMatch([r.customer, r.vendor]) &&
+      productMatch(r.productId)
+    );
+  });
+  const filteredDispatched = dispatched.filter(
+    (r) =>
+      inRange(r.createdAt) &&
+      partyMatch(r.customer) &&
+      productMatch(r.productId),
+  );
+  const filteredBills = appData.bills.filter(
+    (b) => inRange(b.date) && partyMatch(b.customer),
+  );
+  const filteredProducts = appData.products.filter(
+    (p) => productMatch(p.id) && (party ? partyMatch([p.category]) : true),
+  );
+  const filteredBins = binCells.filter((c) => {
+    if (c === "empty") return !product;
+    return productMatch(c.productId);
+  });
+
+  const hasFilters = fromDate || toDate || party || product;
+  const resetFilters = () => {
+    setFromDate("");
+    setToDate("");
+    setParty("");
+    setProduct("");
+  };
+
+
   const billTotal = (pred) =>
-    appData.bills.filter(pred).reduce((sum, b) => {
+    filteredBills.filter(pred).reduce((sum, b) => {
       const n = parseInt(String(b.amount).replace(/[^\d]/g, ""), 10) || 0;
       return sum + n;
     }, 0);
@@ -3352,14 +3416,14 @@ function ReportsPage({ appData }) {
     inventory: (
       <>
         {renderSummary([
-          ["Total bins", totalBins, "primary"],
-          ["Occupied", occupiedBins, "success"],
-          ["Empty", totalBins - occupiedBins, "muted"],
-          ["Utilization", `${utilization}%`, "primary"],
+          ["Bins (filtered)", filteredBins.length, "primary"],
+          ["Occupied", filteredBins.filter((c) => c !== "empty").length, "success"],
+          ["Empty", filteredBins.filter((c) => c === "empty").length, "muted"],
+          ["Utilization", `${filteredBins.length ? Math.round((filteredBins.filter((c) => c !== "empty").length / filteredBins.length) * 100) : 0}%`, "primary"],
         ])}
         <Table
           columns={["Bin", "Product", "Category", "Status", "Expiry"]}
-          rows={binCells.map((c, i) => {
+          rows={filteredBins.map((c, i) => {
             const bin = c && c.bin ? c.bin : `Bin ${i + 1}`;
             if (c === "empty") return [bin, "—", "—", "Empty", "—"];
             return [bin, c.productName || "—", (c.category || "—"), c.status || "—", c.expiryDate && c.expiryDate !== "none" ? c.expiryDate : "Non-expiring"];
@@ -3372,8 +3436,8 @@ function ReportsPage({ appData }) {
         {renderSummary([
           ["Inward roots", appData.inwardConsignments.length, "primary"],
           ["Total inward docs", appData.inward.length, "primary"],
-          ["GRN raised", grns.length, "success"],
-          ["Pending inward QC", appData.inwardConsignments.filter((c) => c.currentStage && c.currentStage <= 4).length, "warning"],
+          ["GRN (filtered)", filteredGrns.length, "success"],
+          ["Has filters", hasFilters ? "Yes" : "No", hasFilters ? "warning" : "muted"],
         ])}
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
           {Object.entries(inCounts).map(([label, count]) => (
@@ -3385,7 +3449,7 @@ function ReportsPage({ appData }) {
         </div>
         <Table
           columns={["GRN #", "Batch", "Product", "Bin", "Date"]}
-          rows={grns.map((r) => {
+          rows={filteredGrns.map((r) => {
             const p = appData.products.find((x) => x.id === r.productId);
             return [r.id, r.commonNumber, p ? p.name : "—", r.binRef || "—", r.createdAt];
           })}
@@ -3397,8 +3461,8 @@ function ReportsPage({ appData }) {
         {renderSummary([
           ["Outward consignments", appData.outwardConsignments.length, "primary"],
           ["Total outward docs", appData.outward.length, "primary"],
-          ["Dispatched", appData.outwardConsignments.filter((c) => c.currentStage >= 5).length, "success"],
-          ["Pending outward QC", appData.outwardConsignments.filter((c) => c.currentStage && c.currentStage <= 3).length, "warning"],
+          ["Dispatched (filtered)", filteredDispatched.length, "success"],
+          ["Has filters", hasFilters ? "Yes" : "No", hasFilters ? "warning" : "muted"],
         ])}
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
           {Object.entries(outCounts).map(([label, count]) => (
@@ -3409,22 +3473,25 @@ function ReportsPage({ appData }) {
           ))}
         </div>
         <Table
-          columns={["Doc #", "Batch", "Customer", "Vehicle", "Date"]}
-          rows={dispatched.map((r) => [r.id, r.commonNumber, r.customer || "—", r.vehicleNo || "—", r.createdAt])}
+          columns={["Doc #", "Batch", "Customer", "Product", "Vehicle", "Date"]}
+          rows={filteredDispatched.map((r) => {
+            const p = appData.products.find((x) => x.id === r.productId);
+            return [r.id, r.commonNumber, r.customer || "—", p ? p.name : "—", r.vehicleNo || "—", r.createdAt];
+          })}
         />
       </>
     ),
     billing: (
       <>
         {renderSummary([
-          ["Total bills", appData.bills.length, "primary"],
+          ["Bills (filtered)", filteredBills.length, "primary"],
           ["Inward value", `₹${billTotal((b) => b.flow === "Inward").toLocaleString("en-IN")}`, "success"],
           ["Outward value", `₹${billTotal((b) => b.flow === "Outward").toLocaleString("en-IN")}`, "primary"],
           ["Total value", `₹${billTotal(() => true).toLocaleString("en-IN")}`, "success"],
         ])}
         <Table
           columns={["Bill #", "Customer", "Linked doc", "Amount", "Date", "Flow", "Status"]}
-          rows={appData.bills.map((b) => [
+          rows={filteredBills.map((b) => [
             b.billNo,
             b.customer,
             b.linkedDoc,
@@ -3439,14 +3506,14 @@ function ReportsPage({ appData }) {
     expiry: (
       <>
         {renderSummary([
-          ["Fresh", appData.products.filter((p) => p.status === "fresh").length, "success"],
-          ["Near expiry", appData.products.filter((p) => p.status === "near expiry").length, "warning"],
-          ["Expired", appData.products.filter((p) => p.status === "expired").length, "danger"],
-          ["Non-expiring", appData.products.filter((p) => p.status === "non expiring").length, "primary"],
+          ["Products (filtered)", filteredProducts.length, "primary"],
+          ["Fresh", filteredProducts.filter((p) => p.status === "fresh").length, "success"],
+          ["Near expiry", filteredProducts.filter((p) => p.status === "near expiry").length, "warning"],
+          ["Expired", filteredProducts.filter((p) => p.status === "expired").length, "danger"],
         ])}
         <Table
           columns={["SKU", "Product", "Category", "Expiry", "Status"]}
-          rows={appData.products.map((p) => [
+          rows={filteredProducts.map((p) => [
             p.id,
             p.name,
             p.category,
@@ -3474,6 +3541,66 @@ function ReportsPage({ appData }) {
             {t.label}
           </button>
         ))}
+      </div>
+      <div
+        style={{ background: c.card, border: `1px solid ${c.border}` }}
+        className="rounded-md p-3 sm:p-4 flex flex-col lg:flex-row lg:items-end gap-3"
+      >
+        <div className="flex flex-col gap-1">
+          <label style={{ color: c.muted }} className="text-[11px] font-medium">From date</label>
+          <input
+            type="date"
+            value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            style={{ borderColor: c.border, color: c.text }}
+            className="px-3 py-2 rounded-md border text-sm outline-none focus:ring-2"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label style={{ color: c.muted }} className="text-[11px] font-medium">To date</label>
+          <input
+            type="date"
+            value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
+            style={{ borderColor: c.border, color: c.text }}
+            className="px-3 py-2 rounded-md border text-sm outline-none focus:ring-2"
+          />
+        </div>
+        <div className="flex flex-col gap-1 lg:min-w-[220px] flex-1">
+          <label style={{ color: c.muted }} className="text-[11px] font-medium">Client / Party</label>
+          <select
+            value={party}
+            onChange={(e) => setParty(e.target.value)}
+            style={{ borderColor: c.border, color: c.text }}
+            className="px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 bg-white"
+          >
+            <option value="">All clients / parties</option>
+            {partyOptions.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </div>
+        <div className="flex flex-col gap-1 lg:min-w-[220px] flex-1">
+          <label style={{ color: c.muted }} className="text-[11px] font-medium">Product</label>
+          <select
+            value={product}
+            onChange={(e) => setProduct(e.target.value)}
+            style={{ borderColor: c.border, color: c.text }}
+            className="px-3 py-2 rounded-md border text-sm outline-none focus:ring-2 bg-white"
+          >
+            <option value="">All products</option>
+            {productOptions.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+        </div>
+        <button
+          onClick={resetFilters}
+          style={{ color: hasFilters ? c.danger : c.faint, borderColor: hasFilters ? c.danger : c.border }}
+          className="px-3.5 py-2 rounded-md border text-xs font-semibold self-start lg:self-auto"
+        >
+          Clear filters
+        </button>
       </div>
       <div>{content[tab]}</div>
     </div>
@@ -3515,26 +3642,16 @@ export default function App() {
   // in the (now hierarchical) inward tree.
   const inwardCounts = useMemo(() => {
     const acc = Object.fromEntries(IN_TYPE_KEYS.map((k) => [k, 0]));
-    const byType = { preGateInward: 0, gateInward: 0, inward: 0, checklistUnloading: 0, qualityCheck: 0, goodReceiptNote: 0 };
     appData.inward.forEach((r) => {
-      if (r.status === "completed" && byType[r.type] !== undefined) byType[r.type]++;
-    });
-    IN_TYPE_KEYS.forEach((key, idx) => {
-      // funnel: records at this stage or deeper
-      for (let j = idx; j < IN_TYPE_KEYS.length; j++) acc[IN_TYPE_KEYS[j]] += byType[key];
+      if (acc[r.type] !== undefined) acc[r.type]++;
     });
     return acc;
   }, [appData.inward]);
 
   const outwardCounts = useMemo(() => {
     const acc = Object.fromEntries(OUT_TYPE_KEYS.map((k) => [k, 0]));
-    const byType = { pickList: 0, pick: 0, qualityCheckOutward: 0, checklistLoading: 0, dispatch: 0, outward: 0 };
     appData.outward.forEach((r) => {
-      if (r.status === "completed" && byType[r.type] !== undefined) byType[r.type]++;
-    });
-    OUT_TYPE_KEYS.forEach((key, idx) => {
-      // funnel: records at this stage or deeper
-      for (let j = idx; j < OUT_TYPE_KEYS.length; j++) acc[OUT_TYPE_KEYS[j]] += byType[key];
+      if (acc[r.type] !== undefined) acc[r.type]++;
     });
     return acc;
   }, [appData.outward]);
