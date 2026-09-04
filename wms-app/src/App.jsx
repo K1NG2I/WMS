@@ -33,6 +33,9 @@ import {
   Download,
   QrCode,
   Barcode,
+  BarChart3,
+  FileText,
+  ExternalLink,
 } from "lucide-react";
 import initialAppData from "./data/appData.json";
 import QRCode from "qrcode";
@@ -704,6 +707,7 @@ const NAV = [
     ],
   },
   { id: "attendance", label: "Attendance & MHE", icon: Users },
+  { id: "reports", label: "Reports", icon: BarChart3 },
   { id: "tracktrace", label: "Track & Trace", icon: Radar },
   { id: "recyclebin", label: "Recycle Bin", icon: Trash2 },
 ];
@@ -721,6 +725,7 @@ const PAGE_TITLES = {
   "fin-invoices": ["Finance", "Invoices"],
   "fin-payments": ["Finance", "Payments"],
   attendance: ["Operations", "Attendance & MHE Log"],
+  reports: ["Reports", null],
   tracktrace: ["Track & Trace", null],
   recyclebin: ["Recycle Bin", null],
 };
@@ -748,46 +753,58 @@ function Pill({ tone = "muted", children }) {
   );
 }
 
-function StatCard({ label, value, sub, tone = "primary", tooltip = [] }) {
+function StatCard({ label, value, sub, tone = "primary", tooltip = [], onClick }) {
   const tones = {
     primary: c.primary,
     warning: c.warning,
     success: c.success,
     danger: c.danger,
   };
+  const inner = (
+    <div
+      onClick={onClick}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (e) => { if (e.key === "Enter" || e.key === " ") onClick(); } : undefined}
+      style={{
+        background: c.card,
+        border: `1px solid ${c.border}`,
+        cursor: onClick ? "pointer" : "default",
+      }}
+      className="rounded-md p-4 sm:p-5 flex flex-col gap-2 transition-all hover:shadow-md"
+    >
+      <span style={{ color: c.muted }} className="text-xs sm:text-sm flex items-center justify-between gap-2">
+        {label}
+        {onClick && <ExternalLink size={13} style={{ color: c.faint }} />}
+      </span>
+      <span
+        style={{ color: c.text }}
+        className="text-2xl sm:text-3xl font-semibold"
+      >
+        {value}
+      </span>
+      <div className="flex items-center gap-2">
+        <div
+          style={{ background: c.surface }}
+          className="h-1.5 flex-1 rounded-full overflow-hidden"
+        >
+          <div
+            style={{ background: tones[tone], width: sub.pct + "%" }}
+            className="h-full rounded-full"
+          />
+        </div>
+        <span
+          style={{ color: c.faint }}
+          className="text-[11px] sm:text-xs font-medium"
+        >
+          {sub.text}
+        </span>
+      </div>
+    </div>
+  );
   return (
     <div className="relative group">
-      <div
-        style={{ background: c.card, border: `1px solid ${c.border}` }}
-        className="rounded-md p-4 sm:p-5 flex flex-col gap-2"
-      >
-        <span style={{ color: c.muted }} className="text-xs sm:text-sm">
-          {label}
-        </span>
-        <span
-          style={{ color: c.text }}
-          className="text-2xl sm:text-3xl font-semibold"
-        >
-          {value}
-        </span>
-        <div className="flex items-center gap-2">
-          <div
-            style={{ background: c.surface }}
-            className="h-1.5 flex-1 rounded-full overflow-hidden"
-          >
-            <div
-              style={{ background: tones[tone], width: sub.pct + "%" }}
-              className="h-full rounded-full"
-            />
-          </div>
-          <span
-            style={{ color: c.faint }}
-            className="text-[11px] sm:text-xs font-medium"
-          >
-            {sub.text}
-          </span>
-        </div>
-      </div>
+      {inner}
       {tooltip.length > 0 && (
         <div
           style={{
@@ -823,7 +840,7 @@ function StatCard({ label, value, sub, tone = "primary", tooltip = [] }) {
 }
 
 
-function BinMap({ bins }) {
+function BinMap({ bins, onSelectCell }) {
   const { cols, rows, cells } = bins;
   const colorFor = {
     expired: "#000000", // black
@@ -899,11 +916,14 @@ function BinMap({ bins }) {
             key={i}
             onMouseMove={(e) => showTip(entry, i, e)}
             onMouseLeave={() => setTip(null)}
+            onClick={() => onSelectCell && onSelectCell(entry, i)}
+            role={onSelectCell ? "button" : undefined}
+            tabIndex={onSelectCell ? 0 : undefined}
             style={{
               background: getColor(entry),
               aspectRatio: "16 / 10",
               borderRadius: 2,
-              cursor: "pointer",
+              cursor: onSelectCell ? "pointer" : "pointer",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
@@ -984,7 +1004,7 @@ function BinMap({ bins }) {
   );
 }
 
-function Pipeline({ title, stages }) {
+function Pipeline({ title, stages, onSelectStage }) {
   return (
     <div
       style={{ background: c.card, border: `1px solid ${c.border}` }}
@@ -999,7 +1019,14 @@ function Pipeline({ title, stages }) {
       <div className="flex items-stretch overflow-x-auto pb-2 gap-y-3">
         {stages.map((s, i) => (
           <React.Fragment key={s.label}>
-            <div className="flex flex-col items-center gap-2 px-2 sm:px-3 min-w-[76px] sm:min-w-[86px]">
+            <div
+              role={onSelectStage ? "button" : undefined}
+              tabIndex={onSelectStage ? 0 : undefined}
+              onClick={onSelectStage ? () => onSelectStage(s, i) : undefined}
+              onKeyDown={onSelectStage ? (e) => { if (e.key === "Enter" || e.key === " ") onSelectStage(s, i); } : undefined}
+              className="flex flex-col items-center gap-2 px-2 sm:px-3 min-w-[76px] sm:min-w-[86px] transition-all rounded-md hover:bg-gray-50"
+              style={{ cursor: onSelectStage ? "pointer" : "default" }}
+            >
               <div
                 style={{ background: c.surface, color: c.text }}
                 className="w-9 h-9 sm:w-10 sm:h-10 rounded-md flex items-center justify-center"
@@ -3175,6 +3202,284 @@ function Dock({ forms, onRestore, onClose }) {
   );
 }
 
+function DetailModal({ title, subtitle, columns, rows, linkLabel, onLink, onClose }) {
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-end sm:items-center justify-center p-0 sm:p-4"
+      style={{ background: "rgba(15,23,42,0.55)" }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: c.card, border: `1px solid ${c.border}`, maxHeight: "88vh" }}
+        className="w-full sm:max-w-2xl rounded-t-lg sm:rounded-lg flex flex-col overflow-hidden"
+      >
+        <div className="flex items-start justify-between gap-2 px-4 py-3 border-b" style={{ borderColor: c.border }}>
+          <div>
+            <h4 style={{ color: c.text }} className="font-semibold text-sm sm:text-base">
+              {title}
+            </h4>
+            {subtitle && (
+              <p style={{ color: c.muted }} className="text-xs mt-0.5">{subtitle}</p>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            style={{ color: c.faint }}
+            className="p-1.5 rounded hover:bg-gray-100"
+            title="Close"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="overflow-auto flex-1 min-h-0 p-4">
+          {rows && rows.length > 0 ? (
+            <table className="w-full text-xs sm:text-sm border-collapse">
+              <thead>
+                <tr style={{ color: c.muted }} className="text-left">
+                  {columns.map((col) => (
+                    <th key={col} className="font-medium py-1.5 px-2 first:pl-0 whitespace-nowrap">
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => (
+                  <tr key={i} style={{ borderTop: `1px solid ${c.border}` }}>
+                    {row.map((cell, j) => (
+                      <td key={j} className="py-2 px-2 first:pl-0 whitespace-nowrap" style={{ color: c.text }}>
+                        {cell}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p style={{ color: c.muted }} className="text-sm">No records found.</p>
+          )}
+        </div>
+        {onLink && (
+          <div className="px-4 py-3 border-t flex justify-end" style={{ borderColor: c.border }}>
+            <button
+              onClick={onLink}
+              style={{ background: c.primary, color: "#fff" }}
+              className="px-3.5 py-2 rounded-md text-xs font-semibold flex items-center gap-1.5 hover:opacity-90"
+            >
+              {linkLabel || "View full listing"} <ExternalLink size={13} />
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReportsPage({ appData }) {
+  const [tab, setTab] = useState("inventory");
+  const tabs = [
+    { id: "inventory", label: "Inventory" },
+    { id: "inbound", label: "Inbound (GRN)" },
+    { id: "outbound", label: "Outbound (Dispatch)" },
+    { id: "billing", label: "Billing" },
+    { id: "expiry", label: "Product Expiry" },
+  ];
+
+  const binCells = appData.bins.cells;
+  const occupied = binCells.filter((c) => c !== "empty");
+  const occupiedBins = occupied.length;
+  const totalBins = binCells.length;
+  const utilization = totalBins ? Math.round((occupiedBins / totalBins) * 100) : 0;
+  const grns = appData.inward.filter((r) => r.type === "goodReceiptNote");
+  const dispatched = appData.outward.filter((r) => r.type === "outward");
+
+  const billTotal = (pred) =>
+    appData.bills.filter(pred).reduce((sum, b) => {
+      const n = parseInt(String(b.amount).replace(/[^\d]/g, ""), 10) || 0;
+      return sum + n;
+    }, 0);
+
+  const renderSummary = (cards) => (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
+      {cards.map(([label, value, tone]) => (
+        <div key={label} style={{ background: c.card, border: `1px solid ${c.border}` }} className="rounded-md p-4">
+          <span style={{ color: c.muted }} className="text-xs">{label}</span>
+          <div style={{ color: c.text }} className="text-xl sm:text-2xl font-semibold mt-1">{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+
+  const Table = ({ columns, rows }) => (
+    <div style={{ background: c.card, border: `1px solid ${c.border}` }} className="rounded-md overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs sm:text-sm border-collapse min-w-[560px]">
+          <thead>
+            <tr style={{ color: c.muted }} className="text-left border-b" >
+              {columns.map((col) => (
+                <th key={col} className="font-medium py-2.5 px-4 whitespace-nowrap">{col}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} style={{ borderTop: `1px solid ${c.border}` }}>
+                {row.map((cell, j) => (
+                  <td key={j} className="py-2.5 px-4 whitespace-nowrap" style={{ color: c.text }}>{cell}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  const stageCounts = (records, meta) => {
+    const acc = {};
+    meta.forEach((m) => (acc[m.label] = 0));
+    records.forEach((r) => {
+      const m = meta.find((x) => x.key === r.type);
+      if (m) acc[m.label] = (acc[m.label] || 0) + 1;
+    });
+    return acc;
+  };
+  const inCounts = stageCounts(appData.inward, IN_STAGE_META);
+  const outCounts = stageCounts(appData.outward, OUT_STAGE_META);
+
+  const content = {
+    inventory: (
+      <>
+        {renderSummary([
+          ["Total bins", totalBins, "primary"],
+          ["Occupied", occupiedBins, "success"],
+          ["Empty", totalBins - occupiedBins, "muted"],
+          ["Utilization", `${utilization}%`, "primary"],
+        ])}
+        <Table
+          columns={["Bin", "Product", "Category", "Status", "Expiry"]}
+          rows={binCells.map((c, i) => {
+            const bin = c && c.bin ? c.bin : `Bin ${i + 1}`;
+            if (c === "empty") return [bin, "—", "—", "Empty", "—"];
+            return [bin, c.productName || "—", (c.category || "—"), c.status || "—", c.expiryDate && c.expiryDate !== "none" ? c.expiryDate : "Non-expiring"];
+          })}
+        />
+      </>
+    ),
+    inbound: (
+      <>
+        {renderSummary([
+          ["Inward roots", appData.inwardConsignments.length, "primary"],
+          ["Total inward docs", appData.inward.length, "primary"],
+          ["GRN raised", grns.length, "success"],
+          ["Pending inward QC", appData.inwardConsignments.filter((c) => c.currentStage && c.currentStage <= 4).length, "warning"],
+        ])}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
+          {Object.entries(inCounts).map(([label, count]) => (
+            <div key={label} style={{ background: c.card, border: `1px solid ${c.border}` }} className="rounded-md p-3 flex items-center justify-between">
+              <span style={{ color: c.muted }} className="text-xs">{label}</span>
+              <span style={{ color: c.text }} className="font-semibold text-sm">{count}</span>
+            </div>
+          ))}
+        </div>
+        <Table
+          columns={["GRN #", "Batch", "Product", "Bin", "Date"]}
+          rows={grns.map((r) => {
+            const p = appData.products.find((x) => x.id === r.productId);
+            return [r.id, r.commonNumber, p ? p.name : "—", r.binRef || "—", r.createdAt];
+          })}
+        />
+      </>
+    ),
+    outbound: (
+      <>
+        {renderSummary([
+          ["Outward consignments", appData.outwardConsignments.length, "primary"],
+          ["Total outward docs", appData.outward.length, "primary"],
+          ["Dispatched", appData.outwardConsignments.filter((c) => c.currentStage >= 5).length, "success"],
+          ["Pending outward QC", appData.outwardConsignments.filter((c) => c.currentStage && c.currentStage <= 3).length, "warning"],
+        ])}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-5">
+          {Object.entries(outCounts).map(([label, count]) => (
+            <div key={label} style={{ background: c.card, border: `1px solid ${c.border}` }} className="rounded-md p-3 flex items-center justify-between">
+              <span style={{ color: c.muted }} className="text-xs">{label}</span>
+              <span style={{ color: c.text }} className="font-semibold text-sm">{count}</span>
+            </div>
+          ))}
+        </div>
+        <Table
+          columns={["Doc #", "Batch", "Customer", "Vehicle", "Date"]}
+          rows={dispatched.map((r) => [r.id, r.commonNumber, r.customer || "—", r.vehicleNo || "—", r.createdAt])}
+        />
+      </>
+    ),
+    billing: (
+      <>
+        {renderSummary([
+          ["Total bills", appData.bills.length, "primary"],
+          ["Inward value", `₹${billTotal((b) => b.flow === "Inward").toLocaleString("en-IN")}`, "success"],
+          ["Outward value", `₹${billTotal((b) => b.flow === "Outward").toLocaleString("en-IN")}`, "primary"],
+          ["Total value", `₹${billTotal(() => true).toLocaleString("en-IN")}`, "success"],
+        ])}
+        <Table
+          columns={["Bill #", "Customer", "Linked doc", "Amount", "Date", "Flow", "Status"]}
+          rows={appData.bills.map((b) => [
+            b.billNo,
+            b.customer,
+            b.linkedDoc,
+            b.amount,
+            b.date,
+            b.flow,
+            b.status,
+          ])}
+        />
+      </>
+    ),
+    expiry: (
+      <>
+        {renderSummary([
+          ["Fresh", appData.products.filter((p) => p.status === "fresh").length, "success"],
+          ["Near expiry", appData.products.filter((p) => p.status === "near expiry").length, "warning"],
+          ["Expired", appData.products.filter((p) => p.status === "expired").length, "danger"],
+          ["Non-expiring", appData.products.filter((p) => p.status === "non expiring").length, "primary"],
+        ])}
+        <Table
+          columns={["SKU", "Product", "Category", "Expiry", "Status"]}
+          rows={appData.products.map((p) => [
+            p.id,
+            p.name,
+            p.category,
+            p.expiryDate && p.expiryDate !== "none" ? p.expiryDate : "Non-expiring",
+            p.status,
+          ])}
+        />
+      </>
+    ),
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 border-b" style={{ borderColor: c.border }}>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className="px-3.5 py-2 rounded-t-md text-xs sm:text-sm font-medium whitespace-nowrap"
+            style={{
+              color: tab === t.id ? c.primary : c.muted,
+              borderBottom: tab === t.id ? `2px solid ${c.primary}` : "2px solid transparent",
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div>{content[tab]}</div>
+    </div>
+  );
+}
+
 export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -3184,6 +3489,7 @@ export default function App() {
   const [forms, setForms] = useState([]);
   const [appData, setAppData] = useState(initialAppData);
   const [savedWorkflowRows, setSavedWorkflowRows] = useState([]);
+  const [detail, setDetail] = useState(null);
   const idRef = useRef(0);
   const zRef = useRef(60);
   const cascadeRef = useRef(0);
@@ -3911,6 +4217,14 @@ export default function App() {
 
   const [section, sub] = PAGE_TITLES[activePage] || ["Dashboard", null];
 
+  const openDetail = (d) => setDetail(d);
+  const closeDetail = () => setDetail(null);
+  const goToPage = (pageId) => {
+    setActivePage(pageId);
+    setMobileNavOpen(false);
+    setDetail(null);
+  };
+
   return (
     <div
       style={{ fontFamily: "Manrope, sans-serif", background: c.surface }}
@@ -4143,6 +4457,20 @@ export default function App() {
                     text: `${dashboardStats.occupiedBins} / ${dashboardStats.totalBins}`,
                   }}
                   tone="primary"
+                  onClick={() =>
+                    openDetail({
+                      title: "Bin utilization",
+                      subtitle: `${dashboardStats.occupiedBins} of ${dashboardStats.totalBins} bins occupied (${dashboardStats.utilization}%)`,
+                      columns: ["Bin", "Status", "Product"],
+                      rows: appData.bins.cells.map((c, i) => {
+                        const bin = c && c.bin ? c.bin : `Bin ${i + 1}`;
+                        if (c === "empty") return [bin, "Empty", "—"];
+                        return [bin, c.status || "—", c.productName || "—"];
+                      }),
+                      linkLabel: "Open Bin Locations",
+                      onLink: () => goToPage("masters-locations"),
+                    })
+                  }
                   tooltip={[
                     [
                       "Fresh",
@@ -4176,28 +4504,117 @@ export default function App() {
                   value={dashboardStats.pendingInwardQC}
                   sub={{ pct: 45, text: "lots waiting" }}
                   tone="warning"
+                  onClick={() =>
+                    openDetail({
+                      title: "Pending inward QC",
+                      subtitle: "Consignments still moving through inward QC stages",
+                      columns: ["Batch", "Customer", "Stage", "Date"],
+                      rows: appData.inwardConsignments
+                        .filter((c) => c.currentStage && c.currentStage <= 4)
+                        .map((c) => [
+                          c.commonNumber,
+                          c.customer || "—",
+                          IN_STAGE_META[(c.currentStage || 1) - 1]?.label || "—",
+                          c.createdDate,
+                        ]),
+                      linkLabel: "Open Inward",
+                      onLink: () => goToPage("txn-inward"),
+                    })
+                  }
                 />
                 <StatCard
                   label="Pending outward QC"
                   value={dashboardStats.pendingOutwardQC}
                   sub={{ pct: 28, text: "lots waiting" }}
                   tone="warning"
+                  onClick={() =>
+                    openDetail({
+                      title: "Pending outward QC",
+                      subtitle: "Consignments still moving through outward QC stages",
+                      columns: ["Batch", "Customer", "Vehicle", "Stage"],
+                      rows: appData.outwardConsignments
+                        .filter((c) => c.currentStage && c.currentStage <= 3)
+                        .map((c) => [
+                          c.commonNumber,
+                          c.customer || "—",
+                          c.vehicleNo || "—",
+                          OUT_STAGE_META[(c.currentStage || 1) - 1]?.label || "—",
+                        ]),
+                      linkLabel: "Open Outward",
+                      onLink: () => goToPage("txn-outward"),
+                    })
+                  }
                 />
                 <StatCard
                   label="Today's dispatches"
                   value={dashboardStats.dispatched}
                   sub={{ pct: 80, text: "dispatched to date" }}
                   tone="success"
+                  onClick={() =>
+                    openDetail({
+                      title: "Dispatched consignments",
+                      subtitle: "Outward consignments that reached Dispatch or beyond",
+                      columns: ["Batch", "Customer", "Vehicle", "Stage"],
+                      rows: appData.outwardConsignments
+                        .filter((c) => c.currentStage >= 5)
+                        .map((c) => [
+                          c.commonNumber,
+                          c.customer || "—",
+                          c.vehicleNo || "—",
+                          OUT_STAGE_META[(c.currentStage || 1) - 1]?.label || "—",
+                        ]),
+                      linkLabel: "Open Outward",
+                      onLink: () => goToPage("txn-outward"),
+                    })
+                  }
                 />
               </div>
 
-              <BinMap bins={appData.bins} />
+              <BinMap
+                bins={appData.bins}
+                onSelectCell={(entry, i) =>
+                  openDetail({
+                    title: entry === "empty" ? "Empty bin" : (entry.bin || `Bin ${i + 1}`),
+                    subtitle: entry === "empty" ? "Slot freed by dispatch" : "Occupied bin details",
+                    columns: ["Field", "Value"],
+                    rows:
+                      entry === "empty"
+                        ? [["Status", "Empty"]]
+                        : [
+                            ["Bin", entry.bin || `Bin ${i + 1}`],
+                            ["Product", entry.productName || "—"],
+                            ["SKU", entry.productId || "—"],
+                            ["Category", entry.category || "—"],
+                            ["Status", entry.status || "—"],
+                            ["Expiry", entry.expiryDate && entry.expiryDate !== "none" ? entry.expiryDate : "Non-expiring"],
+                          ],
+                    linkLabel: "Open Bin Locations",
+                    onLink: () => goToPage("masters-locations"),
+                  })
+                }
+              />
 
               <StatCard
                 label="Product expiry"
                 value={`Fresh ${fresh}, Near ${near}, Expired ${expired}, Non‑expiring ${non}`}
                 sub={{ pct: total ? Math.round(((fresh + near + non) / total) * 100) : 0, text: `${total} total SKUs` }}
                 tone="primary"
+                onClick={() =>
+                  openDetail({
+                    title: "Product expiry",
+                    subtitle: `${total} SKUs by shelf-life status`,
+                    columns: ["SKU", "Product", "Category", "Expiry", "Status"],
+                    rows: appData.products.map((p) => [
+                      p.id,
+                      p.name,
+                      p.category,
+                      p.expiryDate && p.expiryDate !== "none" ? p.expiryDate : "Non-expiring",
+                      p.status,
+                    ]),
+                    linkLabel: "Open Products",
+                    onLink: () => goToPage("masters-products"),
+                  })
+                }
               />
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -4215,6 +4632,21 @@ export default function App() {
                     { label: "Quality Check", count: inwardCounts.qualityCheck, icon: PackageCheck },
                     { label: "Good Receipt Note", count: inwardCounts.goodReceiptNote, icon: FileCheck },
                   ]}
+                  onSelectStage={(s, i) =>
+                    openDetail({
+                      title: `Inward · ${s.label}`,
+                      subtitle: `${s.count} records at this stage`,
+                      columns: ["Doc #", "Batch", "Product", "Bin", "Date"],
+                      rows: appData.inward
+                        .filter((r) => IN_STAGE_META[i] && r.type === IN_STAGE_META[i].key)
+                        .map((r) => {
+                          const p = appData.products.find((x) => x.id === r.productId);
+                          return [r.id, r.commonNumber, p ? p.name : "—", r.binRef || "—", r.createdAt || "—"];
+                        }),
+                      linkLabel: "Open Inward",
+                      onLink: () => goToPage("txn-inward"),
+                    })
+                  }
                 />
                 <Pipeline
                   title="Outward pipeline — today"
@@ -4230,6 +4662,18 @@ export default function App() {
                     { label: "Dispatch", count: outwardCounts.dispatch, icon: Truck },
                     { label: "Outward", count: outwardCounts.outward, icon: FileCheck },
                   ]}
+                  onSelectStage={(s, i) =>
+                    openDetail({
+                      title: `Outward · ${s.label}`,
+                      subtitle: `${s.count} records at this stage`,
+                      columns: ["Doc #", "Batch", "Customer", "Vehicle", "Date"],
+                      rows: appData.outward
+                        .filter((r) => OUT_STAGE_META[i] && r.type === OUT_STAGE_META[i].key)
+                        .map((r) => [r.id, r.commonNumber, r.customer || "—", r.vehicleNo || "—", r.createdAt || "—"]),
+                      linkLabel: "Open Outward",
+                      onLink: () => goToPage("txn-outward"),
+                    })
+                  }
                 />
               </div>
 
@@ -4689,6 +5133,20 @@ export default function App() {
             </div>
           )}
 
+          {activePage === "reports" && (
+            <div className="flex flex-col gap-4">
+              <div>
+                <h2 style={{ color: c.text }} className="text-lg sm:text-xl font-semibold">
+                  Reports
+                </h2>
+                <p style={{ color: c.muted }} className="text-xs sm:text-sm mt-0.5">
+                  Generated live from warehouse data — inventory, inbound, outbound, billing and product expiry.
+                </p>
+              </div>
+              <ReportsPage appData={appData} />
+            </div>
+          )}
+
           {activePage === "tracktrace" && (
             <div className="flex flex-col gap-4">
               <h2
@@ -4996,6 +5454,18 @@ export default function App() {
       </div>
 
       <Dock forms={forms} onRestore={restoreForm} onClose={closeForm} />
+
+      {detail && (
+        <DetailModal
+          title={detail.title}
+          subtitle={detail.subtitle}
+          columns={detail.columns}
+          rows={detail.rows}
+          linkLabel={detail.linkLabel}
+          onLink={detail.onLink}
+          onClose={closeDetail}
+        />
+      )}
     </div>
   );
 }
