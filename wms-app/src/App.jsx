@@ -2512,7 +2512,8 @@ function StageDots({ stages, stageIndex, tone }) {
 function FloatingForm({
   form,
   onChange,
-  onClose,
+  onRequestClose,
+  onClearDraft,
   onMinimize,
   onFocus,
   onSave,
@@ -2701,7 +2702,7 @@ function FloatingForm({
             <Minus size={18} className="md:w-[15px] md:h-[15px]" />
           </button>
           <button
-            onClick={() => onClose(form.id)}
+            onClick={() => onRequestClose(form.id)}
             style={{ color: c.faint }}
             className="p-2 md:p-1.5 rounded hover:bg-gray-100"
             title="Close Form"
@@ -2710,6 +2711,27 @@ function FloatingForm({
           </button>
         </div>
       </div>
+
+      {form.draftRestored && (
+        <div
+          className="px-4 py-1.5 flex items-center justify-between"
+          style={{
+            background: `${tone}14`,
+            borderBottom: `1px solid ${c.border}`,
+          }}
+        >
+          <span style={{ color: tone }} className="text-[11px] font-semibold">
+            Draft loaded — fields pre-filled
+          </span>
+          <button
+            onClick={() => onClearDraft(form.id)}
+            style={{ color: c.muted }}
+            className="text-[11px] font-medium hover:underline"
+          >
+            Clear draft
+          </button>
+        </div>
+      )}
 
       {isFlow && (
         <div
@@ -3150,7 +3172,7 @@ function FloatingForm({
   style={{ borderTop: `1px solid ${c.border}`, background: c.card }}
 >
   <button
-    onClick={() => onClose(form.id)}
+    onClick={() => onRequestClose(form.id)}
     style={{ color: c.muted, borderColor: c.border }}
     className="px-4 py-2 md:py-1.5 rounded-md border text-sm font-medium hover:bg-gray-50"
   >
@@ -3698,6 +3720,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [forms, setForms] = useState([]);
   const [formError, setFormError] = useState("");
+  const [draftPrompt, setDraftPrompt] = useState(null);
   const [appData, setAppData] = useState(initialAppData);
   const [savedWorkflowRows, setSavedWorkflowRows] = useState([]);
   const [detail, setDetail] = useState(null);
@@ -3858,6 +3881,73 @@ export default function App() {
       dispatched,
     };
   }, [appData]);
+
+  const DRAFT_KEY = "wms:drafts";
+
+  const readDrafts = () => {
+    try {
+      return JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}") || {};
+    } catch {
+      return {};
+    }
+  };
+  const readDraft = (key) => readDrafts()[key] || null;
+  const writeDraft = (key, values) => {
+    const drafts = readDrafts();
+    drafts[key] = values;
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(drafts));
+  };
+  const deleteDraft = (key) => {
+    const drafts = readDrafts();
+    if (key in drafts) {
+      delete drafts[key];
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(drafts));
+    }
+  };
+
+  // Simple forms store edits under `${title}_${field}` keys; fold them back to
+  // plain field keys so a saved draft round-trips cleanly into a fresh form.
+  const foldDraftValues = (form) => {
+    const out = {};
+    const prefix = `${form.title}_`;
+    Object.entries(form.values || {}).forEach(([k, v]) => {
+      out[k.startsWith(prefix) ? k.slice(prefix.length) : k] = v;
+    });
+    return out;
+  };
+  const hasDraftableValues = (values) =>
+    values &&
+    Object.values(values).some((v) => v != null && String(v).trim() !== "");
+
+  // Intercept a close so we can offer to keep a draft for simple forms that
+  // actually have content typed into them (workflow forms keep closing as-is).
+  const requestClose = (id) => {
+    const form = forms.find((f) => f.id === id);
+    if (!form) return;
+    if (!form.flowStages && form.draftKey && hasDraftableValues(form.values)) {
+      setDraftPrompt(form);
+    } else {
+      closeForm(id);
+    }
+  };
+  const saveDraftPrompt = () => {
+    if (!draftPrompt) return;
+    writeDraft(draftPrompt.draftKey, foldDraftValues(draftPrompt));
+    setDraftPrompt(null);
+    closeForm(draftPrompt.id);
+  };
+  const discardDraftPrompt = () => {
+    if (!draftPrompt) return;
+    if (draftPrompt.draftKey) deleteDraft(draftPrompt.draftKey);
+    setDraftPrompt(null);
+    closeForm(draftPrompt.id);
+  };
+  const clearFormDraft = (id) => {
+    const form = forms.find((f) => f.id === id);
+    if (!form) return;
+    if (form.draftKey) deleteDraft(form.draftKey);
+    updateForm(id, { draftRestored: false });
+  };
 
   const openForm = (config) => {
     setFormError("");
@@ -4098,6 +4188,7 @@ export default function App() {
           ? prev[form.collection].map((r, i) => (i === form.editIndex ? record : r))
           : [...(prev[form.collection] || []), record],
       }));
+      if (form.draftKey) deleteDraft(form.draftKey);
       setFormError("");
       closeForm(id);
       return;
@@ -4147,6 +4238,7 @@ export default function App() {
           x.id === recordId ? merged : x,
         ),
       }));
+      if (form.draftKey) deleteDraft(form.draftKey);
       closeForm(id);
       return;
     }
@@ -4180,6 +4272,7 @@ export default function App() {
         flow: form.tone ? (form.tone.includes("inward") ? "inward" : "outward") : "simple",
       },
     ]);
+    if (form.draftKey) deleteDraft(form.draftKey);
     closeForm(id);
   };
   const saveAndCopy = (id) => {
@@ -4206,6 +4299,8 @@ export default function App() {
       fields: f.fields,
       collection: f.collection,
       editIndex: -1,
+      draftKey: f.collection ? `m:${f.collection}` : `s:${f.title}`,
+      draftRestored: false,
       flowStages: f.flowStages,
       stageIndex: f.flowStages ? f.stageIndex : undefined,
       docBase: f.flowStages ? genBaseDoc() : undefined,
@@ -4213,21 +4308,48 @@ export default function App() {
     });
   };
 
-  const openSimpleForm = (title, tone = "simple", hidePhoto = false, initialValues = {}, fields = null) =>
-    openForm({ kind: "simple", title, tone, hidePhoto, values: initialValues, fields });
+  const openSimpleForm = (title, tone = "simple", hidePhoto = false, initialValues = {}, fields = null) => {
+    const draftKey = `s:${title}`;
+    const values = { ...initialValues };
+    const draft = readDraft(draftKey);
+    let restored = false;
+    if (draft) {
+      Object.keys(values).forEach((k) => {
+        if (draft[k] !== undefined) values[k] = draft[k];
+      });
+      Object.keys(draft).forEach((k) => {
+        if (values[k] === undefined) values[k] = draft[k];
+      });
+      restored = true;
+    }
+    openForm({ kind: "simple", title, tone, hidePhoto, values, fields, draftKey, draftRestored: restored });
+  };
 
   // Open a draggable/minimizable floating form for a Master's add or edit.
-  // Values are prefilled from the live appData record (by index) for edits.
+  // Values are prefilled from the live appData record (by index) for edits,
+  // and any saved draft for that record is overlaid on top.
   const openMasterForm = (collection, index = -1) => {
     const fields = MASTER_FORM_FIELDS[collection] || [];
     const list = appData[collection] || [];
     const rec = index >= 0 && index < list.length ? list[index] : null;
+    const keyField = fields[0]?.key;
+    const draftKey = rec
+      ? `m:${collection}:${String(rec[keyField] ?? "")}`
+      : `m:${collection}`;
     const values = {};
     if (rec) fields.forEach((f) => { values[f.key] = rec[f.key] != null ? rec[f.key] : ""; });
+    const draft = readDraft(draftKey);
+    let restored = false;
+    if (draft) {
+      fields.forEach((f) => {
+        if (draft[f.key] !== undefined) values[f.key] = draft[f.key];
+      });
+      restored = true;
+    }
     openForm({
       kind: "simple",
       title: rec
-        ? `Edit ${MASTER_LABELS[collection]} — ${rec[fields[0].key] || ""}`
+        ? `Edit ${MASTER_LABELS[collection]} — ${rec[keyField] || ""}`
         : `New ${MASTER_LABELS[collection]}`,
       tone: "simple",
       collection,
@@ -4235,6 +4357,8 @@ export default function App() {
       hidePhoto: true,
       fields,
       values,
+      draftKey,
+      draftRestored: restored,
     });
   };
 
@@ -5742,7 +5866,8 @@ export default function App() {
               key={f.id}
               form={f}
               onChange={changeField}
-              onClose={closeForm}
+              onRequestClose={requestClose}
+              onClearDraft={clearFormDraft}
               onMinimize={minimizeForm}
               onFocus={focusForm}
               onSave={saveForm}
@@ -5763,6 +5888,57 @@ export default function App() {
       </div>
 
       <Dock forms={forms} onRestore={restoreForm} onClose={closeForm} />
+
+      {draftPrompt && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setDraftPrompt(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: c.card, border: `1px solid ${c.border}` }}
+            className="w-full max-w-sm rounded-lg overflow-hidden shadow-2xl"
+          >
+            <div
+              className="px-4 py-3"
+              style={{ borderBottom: `1px solid ${c.border}`, background: c.surface }}
+            >
+              <h4 style={{ color: c.text }} className="text-sm font-semibold">
+                Save draft?
+              </h4>
+            </div>
+            <div className="p-4">
+              <p style={{ color: c.muted }} className="text-sm leading-relaxed">
+                Keep the filled-in fields as a draft? They&apos;ll be pre-filled the
+                next time you open {draftPrompt.title}.
+              </p>
+              <div className="flex items-center justify-end gap-2 mt-4">
+                <button
+                  onClick={() => setDraftPrompt(null)}
+                  style={{ color: c.muted, borderColor: c.border }}
+                  className="px-3 py-1.5 rounded-md border text-xs font-medium hover:bg-gray-50"
+                >
+                  Keep editing
+                </button>
+                <button
+                  onClick={discardDraftPrompt}
+                  style={{ color: c.danger, borderColor: c.danger }}
+                  className="px-3 py-1.5 rounded-md border text-xs font-medium hover:opacity-80"
+                >
+                  Discard
+                </button>
+                <button
+                  onClick={saveDraftPrompt}
+                  style={{ background: c.primary }}
+                  className="px-3 py-1.5 rounded-md text-xs font-semibold text-white hover:opacity-90"
+                >
+                  Save draft
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {detail && (
         <DetailModal
