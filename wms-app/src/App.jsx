@@ -3318,7 +3318,15 @@ function DetailModal({ title, subtitle, columns, rows, linkLabel, onLink, onClos
 function SearchableSelect({ options, value, onChange, placeholder, label }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value);
+  const selectRef = useRef(null);
   useEffect(() => setQuery(value), [value]);
+  useEffect(() => {
+    const closeOnOutsideClick = (event) => {
+      if (!selectRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, []);
   const filtered = options
     .filter((o) => o.toLowerCase().includes(query.toLowerCase()))
     .slice(0, 50);
@@ -3328,7 +3336,7 @@ function SearchableSelect({ options, value, onChange, placeholder, label }) {
     setOpen(false);
   };
   return (
-    <div className="relative flex flex-col gap-1 flex-1 min-w-[0]">
+    <div ref={selectRef} className="relative flex flex-col gap-1 flex-1 min-w-[0]">
       {label && (
         <span style={{ color: c.muted }} className="text-[11px] font-medium">
           {label}
@@ -3368,7 +3376,7 @@ function SearchableSelect({ options, value, onChange, placeholder, label }) {
       {open && (
         <div
           style={{ background: "#fff", border: `1px solid ${c.border}`, boxShadow: "0 8px 24px rgba(0,0,0,0.12)" }}
-          className="absolute z-40 mt-1 w-full max-h-56 overflow-auto rounded-md border"
+          className="absolute left-0 top-full z-40 mt-1 w-full max-h-56 overflow-auto rounded-md border"
         >
           {filtered.length ? (
             filtered.map((o) => (
@@ -3946,7 +3954,7 @@ export default function App() {
     const form = forms.find((f) => f.id === id);
     if (!form) return;
     if (form.draftKey) deleteDraft(form.draftKey);
-    updateForm(id, { draftRestored: false });
+    updateForm(id, { values: {}, draftRestored: false });
   };
 
   const openForm = (config) => {
@@ -4374,7 +4382,8 @@ export default function App() {
     });
     const out = {};
     fieldKeys.forEach((key) => {
-      if (record[key] != null && record[key] !== "") out[key] = record[key];
+      const value = record[key] ?? record.values?.[key];
+      if (value != null && value !== "") out[key] = value;
     });
     out.id = record.id;
     if (record.commonNumber) out.commonNumber = record.commonNumber;
@@ -5617,44 +5626,38 @@ export default function App() {
                         </p>
                       );
                     }
-                    // Resolve the query to a document + join billing by the
-                    // SAME primary key (commonNumber).
-                    const bill = appData.bills.find(
+                    const matchesQuery = (value) =>
+                      String(value || "").toLowerCase().includes(q);
+                    const flows = [
+                      { label: "Inward", records: appData.inward || [], meta: IN_STAGE_META },
+                      { label: "Outward", records: appData.outward || [], meta: OUT_STAGE_META },
+                    ];
+                    const bill = (appData.bills || []).find(
                       (b) =>
-                        b.billNo.toLowerCase().includes(q) ||
-                        b.linkedDoc.toLowerCase().includes(q) ||
-                        b.commonNumber.toLowerCase().includes(q),
+                        matchesQuery(b.billNo) ||
+                        matchesQuery(b.linkedDoc) ||
+                        matchesQuery(b.commonNumber),
                     );
-                    const ba = bill ? bill.commonNumber : null;
-                    const resolveIn = (coll, m) =>
-                      coll
+                    const directMatches = flows.flatMap((flow) =>
+                      flow.records
                         .filter(
-                          (r) =>
-                            r.id.toLowerCase().includes(q) ||
-                            (ba
-                              ? r.commonNumber === ba
-                              : r.commonNumber.toLowerCase().includes(q)),
+                          (record) =>
+                            matchesQuery(record.id) ||
+                            matchesQuery(record.commonNumber) ||
+                            matchesQuery(record.parentId) ||
+                            matchesQuery(record.rootId),
                         )
-                        .sort(
-                          (a, b) =>
-                            m.findIndex((x) => x.key === a.type) -
-                            m.findIndex((x) => x.key === b.type),
-                        );
-                    // Pick the collection by the matched flow (bill), else guess
-                    // from which of the two collections actually matches.
-                    const outCand = bill && bill.flow !== "Outward" ? [] : resolveIn(appData.outward, OUT_STAGE_META);
-                    const inCand = bill && bill.flow === "Outward" ? [] : resolveIn(appData.inward, IN_STAGE_META);
-                    const useOutward = bill ? bill.flow === "Outward" : outCand.length > 0;
-                    const meta = useOutward ? OUT_STAGE_META : IN_STAGE_META;
-                    const raw = useOutward ? outCand : inCand;
-                    // one step per stage (a batch has many child records per stage)
-                    const seenType = new Set();
-                    const resolved = raw.filter((r) => {
-                      if (seenType.has(r.type)) return false;
-                      seenType.add(r.type);
-                      return true;
-                    });
-                    if (!resolved.length) {
+                        .map((record) => ({ ...record, flow: flow.label })),
+                    );
+                    const flow = bill?.flow || directMatches[0]?.flow;
+                    const selectedFlow = flows.find((item) => item.label === flow);
+                    const commonNumbers = new Set(
+                      [bill?.commonNumber, ...directMatches.map((record) => record.commonNumber)].filter(Boolean),
+                    );
+                    const raw = selectedFlow
+                      ? selectedFlow.records.filter((record) => commonNumbers.has(record.commonNumber))
+                      : [];
+                    if (!raw.length) {
                       return (
                         <p style={{ color: c.muted }} className="text-sm">
                           No document matches “{searchQuery}”. Try a GRN number
@@ -5662,11 +5665,30 @@ export default function App() {
                         </p>
                       );
                     }
-                    const last = resolved[resolved.length - 1];
+                    const steps = selectedFlow.meta.map((stage) => ({
+                      ...stage,
+                      documents: raw.filter((record) => record.type === stage.key),
+                    }));
+                    const last = [...steps]
+                      .reverse()
+                      .find((step) => step.documents.length)?.documents.at(-1);
                     const prod =
-                      last.productId &&
+                      last?.productId &&
                       appData.products.find((p) => p.id === last.productId);
-                    const flow = resolved[0] && resolved[0].type.includes("preGate") ? "Inward" : "Outward";
+                    const rootDocument = raw.find((record) => !record.parentId) || raw[0];
+                    const openTraceDocument = (document) => {
+                      const stageIndex = selectedFlow.meta.findIndex(
+                        (stage) => stage.key === document.type,
+                      );
+                      const openWorkflow =
+                        flow === "Inward" ? openInwardForm : openOutwardForm;
+                      openWorkflow(
+                        stageIndex >= 0 ? stageIndex : 0,
+                        document.rootId || rootDocument.id,
+                        document.id,
+                        recordToValues(document, flow.toLowerCase()),
+                      );
+                    };
                     return (
                       <>
                         <div
@@ -5676,7 +5698,7 @@ export default function App() {
                           <div className="flex items-center justify-between flex-wrap gap-2">
                             <div>
                               <div style={{ color: c.muted }} className="text-[10px] font-semibold uppercase tracking-wider">
-                                {flow} · {resolved[0].commonNumber}
+                                {flow} · {raw[0].commonNumber}
                               </div>
                               <div style={{ color: c.text }} className="text-sm font-semibold">
                                 {prod ? prod.name : "—"}
@@ -5721,11 +5743,12 @@ export default function App() {
                             </div>
                           )}
                         </div>
-                        {resolved.map((step, idx) => {
-                          const m = meta.find((x) => x.key === step.type);
-                          const done = step.status === "completed";
+                        {steps.map((step, idx) => {
+                          const done =
+                            step.documents.length > 0 &&
+                            step.documents.every((document) => document.status === "completed");
                           return (
-                            <div key={step.id} className="flex items-center gap-3">
+                            <div key={step.key} className="flex items-start gap-3">
                               <div className="flex flex-col items-center">
                                 <span
                                   className="w-2.5 h-2.5 rounded-full"
@@ -5733,7 +5756,7 @@ export default function App() {
                                     background: done ? "#16A34A" : c.faint,
                                   }}
                                 />
-                                {idx < resolved.length - 1 && (
+                                {idx < steps.length - 1 && (
                                   <span
                                     style={{ background: c.border }}
                                     className="w-px h-8"
@@ -5745,20 +5768,35 @@ export default function App() {
                                   style={{ color: c.text }}
                                   className="text-xs sm:text-sm font-medium"
                                 >
-                                  {m ? m.label : step.type}
+                                  {step.label}
                                   <span
                                     className="ml-2 text-[10px] font-bold uppercase"
-                                    style={{ color: done ? "#16A34A" : c.faint }}
+                                    style={{ color: step.documents.length === 0 ? c.faint : done ? "#16A34A" : "#D97706" }}
                                   >
-                                    {done ? "Done" : "Pending"}
+                                    {step.documents.length === 0 ? "Not created" : done ? "Done" : "In progress"}
                                   </span>
                                 </span>
-                                <span
-                                  style={{ color: c.muted }}
-                                  className="text-[11px]"
-                                >
-                                  {step.id} · {step.createdAt}
-                                </span>
+                                {step.documents.length ? (
+                                  <div className="mt-1 flex flex-wrap gap-1.5">
+                                    {step.documents.map((document) => (
+                                      <button
+                                        key={document.id}
+                                        type="button"
+                                        onClick={() => openTraceDocument(document)}
+                                        title={`Open ${document.id}`}
+                                        style={{ background: c.surface, borderColor: c.border, color: c.muted }}
+                                        className="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-gray-100"
+                                      >
+                                        <Eye size={12} />
+                                        {document.id} · {document.createdAt || "—"}
+                                      </button>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span style={{ color: c.muted }} className="text-[11px]">
+                                    No linked document yet
+                                  </span>
+                                )}
                               </div>
                             </div>
                           );
