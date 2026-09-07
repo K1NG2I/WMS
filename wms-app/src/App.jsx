@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import {
   LayoutDashboard,
   Database,
@@ -35,10 +35,22 @@ import {
   Barcode,
   BarChart3,
   ExternalLink,
+  ScanLine,
+  FileText,
+  CheckCircle2,
+  AlertTriangle,
 } from "lucide-react";
 import initialAppData from "./data/appData.json";
 import QRCode from "qrcode";
 import JsBarcode from "jsbarcode";
+import ImportPage from "./ImportPage.jsx";
+import { downloadFormPdf } from "./lib/pdf.js";
+import {
+  collectionForDocType,
+  isWorkflowDoc,
+  COLLECTION_LABELS,
+} from "./lib/import.js";
+import { blobToDataUrl, dateStamp, loadPdfCache, MAX_CACHE, persistPdfCache } from "./lib/pdfCache.js";
 
 function qrUrl(text, size = 160) {
   try {
@@ -430,6 +442,21 @@ function primaryForStep(step) {
   return tones[(step - 1) % tones.length];
 }
 
+// Resolve the parent record (previous stage) inside a linked consignment for a
+// newly imported mid-flow document. Falls back to the chain root.
+function parentForNewDoc(option, stageIndex) {
+  if (!option) return null;
+  const meta = option.flow === "inward" ? IN_STAGE_META : OUT_STAGE_META;
+  const stepOf = (rec) => {
+    const idx = meta.findIndex((m) => m.key === rec.type);
+    return idx >= 0 ? idx + 1 : 1;
+  };
+  const candidates = (option.stageRecords || [])
+    .filter((r) => stepOf(r) <= stageIndex)
+    .sort((a, b) => stepOf(b) - stepOf(a));
+  return candidates[0] || null;
+}
+
 const STAGE_FIELDS = {
   "Pre Gate Inward": [
     {
@@ -670,6 +697,20 @@ const STAGE_FIELDS = {
     { key: "flow", label: "Inward / Outward", placeholder: "Inward or Outward" },
     { key: "customer", label: "Customer Name", placeholder: "e.g. Nimbus Retail Pvt Ltd" },
   ],
+  "Invoice": [
+    { key: "invoiceNo", label: "Invoice Number", placeholder: "e.g. INV-5502" },
+    { key: "customer", label: "Customer Name", placeholder: "e.g. Nimbus Retail Pvt Ltd" },
+    { key: "date", label: "Invoice Date", type: "date", placeholder: "Select date" },
+    { key: "amount", label: "Total Amount", placeholder: "e.g. ₹18,400" },
+    { key: "status", label: "Status", placeholder: "Paid / Pending / Overdue" },
+  ],
+  "Payment": [
+    { key: "paymentId", label: "Payment ID", placeholder: "e.g. PAY-2210" },
+    { key: "customer", label: "Customer Name", placeholder: "e.g. Nimbus Retail Pvt Ltd" },
+    { key: "invoiceRef", label: "Invoice Reference", placeholder: "e.g. INV-5502" },
+    { key: "amount", label: "Amount", placeholder: "e.g. ₹18,400" },
+    { key: "mode", label: "Payment Mode", placeholder: "UPI / Cheque / Bank Transfer" },
+  ],
 };
 
 const NAV = [
@@ -705,6 +746,7 @@ const NAV = [
       { id: "fin-payments", label: "Payments" },
     ],
   },
+  { id: "import", label: "Import PDF / Scan", icon: ScanLine },
   { id: "attendance", label: "Attendance & MHE", icon: Users },
   { id: "reports", label: "Reports", icon: BarChart3 },
   { id: "tracktrace", label: "Track & Trace", icon: Radar },
@@ -713,6 +755,7 @@ const NAV = [
 
 const PAGE_TITLES = {
   dashboard: ["Dashboard", null],
+  import: ["Import", "PDF / Scan"],
   "masters-customers": ["Masters", "Customers"],
   "masters-products": ["Masters", "Products"],
   "masters-vendors": ["Masters", "Vendors"],
@@ -749,6 +792,44 @@ function Pill({ tone = "muted", children }) {
     >
       {children}
     </span>
+  );
+}
+
+// Stacked toast notifications (bottom-right). tone: success | error | info.
+function ToastStack({ toasts, onDismiss }) {
+  const tones = {
+    success: { icon: <CheckCircle2 size={16} />, color: c.success },
+    error: { icon: <AlertTriangle size={16} />, color: c.danger },
+    info: { icon: <Bell size={16} />, color: c.primary },
+  };
+  return (
+    <div className="fixed bottom-4 right-4 z-[60] flex flex-col gap-2 max-w-sm">
+      {toasts.map((t) => {
+        const tone = tones[t.tone] || tones.info;
+        return (
+          <div
+            key={t.id}
+            className="flex items-start gap-2.5 rounded-md border shadow-lg px-3.5 py-3 text-xs bg-white"
+            style={{ borderColor: tone.color, boxShadow: `0 4px 16px rgba(0,0,0,0.10)` }}
+          >
+            <span style={{ color: tone.color }} className="mt-px flex-shrink-0">
+              {tone.icon}
+            </span>
+            <span className="flex-1 leading-relaxed" style={{ color: c.text }}>
+              {t.message}
+            </span>
+            <button
+              onClick={() => onDismiss(t.id)}
+              style={{ color: c.faint }}
+              className="p-0.5 rounded hover:bg-gray-100 flex-shrink-0"
+              aria-label="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1057,7 +1138,7 @@ function Pipeline({ title, stages, onSelectStage }) {
   );
 }
 
-function ActivityTable({ searchQuery = "", inward = [], outward = [], inwardConsignments = [], outwardConsignments = [] }) {
+function ActivityTable({ searchQuery = "", inward = [], outward = [], inwardConsignments = [], outwardConsignments = [], onDownloadPdf }) {
   const rows = useMemo(() => {
     const result = [];
     const flows = [
@@ -1148,7 +1229,8 @@ function ActivityTable({ searchQuery = "", inward = [], outward = [], inwardCons
               <th className="font-medium py-2 pr-4">Type</th>
               <th className="font-medium py-2 pr-4">Stage</th>
               <th className="font-medium py-2 pr-4">Status</th>
-              <th className="font-medium py-2">Time</th>
+              <th className="font-medium py-2 pr-4">Time</th>
+              <th className="font-medium py-2">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1175,6 +1257,18 @@ function ActivityTable({ searchQuery = "", inward = [], outward = [], inwardCons
                   </td>
                   <td className="py-3 text-xs" style={{ color: c.faint }}>
                     {r.time}
+                  </td>
+                  <td className="py-3">
+                    {onDownloadPdf && (
+                      <button
+                        onClick={() => onDownloadPdf(r)}
+                        style={{ color: c.primary }}
+                        className="inline-flex items-center gap-1 text-xs font-medium hover:underline"
+                        title={`Download PDF for ${r.doc}`}
+                      >
+                        <Download size={12} /> PDF
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))
@@ -1252,6 +1346,109 @@ function Pager({ total, page, setPage, pageSize, setPageSize }) {
   );
 }
 
+// Cached PDFs rendered inside the Recycle Bin so generated documents can be
+// re-downloaded, soft-deleted, and restored just like deleted records.
+function PdfCacheSection({ pdfCache = [], onDownload, onDelete, onRestore, onPurge }) {
+  const active = pdfCache.filter((p) => !p.deletedAt);
+  const deleted = pdfCache.filter((p) => p.deletedAt);
+  if (active.length === 0 && deleted.length === 0) return null;
+
+  const table = (rows, showDeleted) => (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs sm:text-sm border-collapse min-w-[520px]">
+        <thead>
+          <tr style={{ color: c.muted }} className="text-left">
+            <th className="font-medium py-2 px-4">Document</th>
+            <th className="font-medium py-2 px-4">Doc no.</th>
+            <th className="font-medium py-2 px-4">{showDeleted ? "Deleted on" : "Saved on"}</th>
+            <th className="font-medium py-2 px-4">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => (
+            <tr key={p.id} style={{ borderTop: `1px solid ${c.border}` }}>
+              <td className="py-3 px-4 font-semibold" style={{ color: c.text }}>
+                {p.title}
+              </td>
+              <td className="py-3 px-4" style={{ color: c.muted }}>
+                {p.docId}
+              </td>
+              <td className="py-3 px-4" style={{ color: c.muted }}>
+                {showDeleted ? p.deletedAt : new Date(p.createdAt).toLocaleString()}
+              </td>
+              <td className="py-3 px-4">
+                {showDeleted ? (
+                  <>
+                    <button
+                      onClick={() => onRestore(p.id)}
+                      style={{ color: c.primary }}
+                      className="text-xs sm:text-sm font-medium hover:underline mr-3 inline-flex items-center gap-1"
+                    >
+                      <RotateCcw size={14} /> Restore
+                    </button>
+                    <button
+                      onClick={() => onPurge(p.id)}
+                      style={{ color: c.danger }}
+                      className="text-xs sm:text-sm font-medium hover:underline inline-flex items-center gap-1"
+                    >
+                      <Trash2 size={14} /> Delete Permanently
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => onDownload(p)}
+                      style={{ color: c.primary }}
+                      className="text-xs sm:text-sm font-medium hover:underline mr-3 inline-flex items-center gap-1"
+                      title={`Download ${p.fileName}`}
+                    >
+                      <Download size={14} /> Download
+                    </button>
+                    <button
+                      onClick={() => onDelete(p.id)}
+                      style={{ color: c.danger }}
+                      className="text-xs sm:text-sm font-medium hover:underline inline-flex items-center gap-1"
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  </>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <FileText size={16} style={{ color: c.primary }} />
+        <h3 style={{ color: c.text }} className="text-sm font-semibold">
+          Generated PDFs ({active.length})
+        </h3>
+      </div>
+      {active.length > 0 && (
+        <div style={{ background: c.card, border: `1px solid ${c.border}` }} className="rounded-md overflow-hidden">
+          {table(active, false)}
+        </div>
+      )}
+      {deleted.length > 0 && (
+        <div style={{ background: c.card, border: `1px solid ${c.border}` }} className="rounded-md overflow-hidden">
+          <div
+            className="px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider"
+            style={{ color: c.danger, background: c.surface, borderBottom: `1px solid ${c.border}` }}
+          >
+            Deleted PDFs ({deleted.length})
+          </div>
+          {table(deleted, true)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CrudPage({
   title,
   note,
@@ -1261,6 +1458,7 @@ function CrudPage({
   onAdd,
   onEdit,
   onDelete,
+  onDownloadPdf,
   reservedKeys = [],
   globalSearch = "",
   qrIndex = -1,
@@ -1424,6 +1622,16 @@ function CrudPage({
                         </td>
                       ))}
                       <td className="py-3">
+                        {onDownloadPdf && (
+                          <button
+                            onClick={() => onDownloadPdf(row, realIndex)}
+                            style={{ color: c.primary }}
+                            className="inline-flex items-center gap-1 text-xs sm:text-sm font-medium hover:underline mr-3"
+                            title={`Download PDF for ${row[0]}`}
+                          >
+                            <Download size={12} /> PDF
+                          </button>
+                        )}
                         {qrIndex >= 0 && (
                           <button
                             onClick={() => setQrFor(row[qrIndex])}
@@ -1686,6 +1894,7 @@ function TreeRow({
   tone,
   onOpenRow,
   onDeleteRow,
+  onDownloadPdf,
   expandedSet,
   onToggle,
   forceOpen = false,
@@ -1694,6 +1903,7 @@ function TreeRow({
   const hasChildren = !!node.children && node.children.length > 0;
   const isExpanded = forceOpen || expandedSet.has(node.id);
   const step = node.step;
+  const completionStep = node.progressStep || step;
   const activeColor = tone === "inward" ? c.primary : "#7C3AED";
   const isStageSelected = selectedStep !== undefined && selectedStep === step - 1;
   const [labelOpen, setLabelOpen] = useState(null); // {type, value}
@@ -1784,14 +1994,14 @@ function TreeRow({
             >
               <div
                 style={{
-                  width: `${Math.max(8, Math.min(100, (step / Math.max(1, stages.length)) * 100))}%`,
+                  width: `${Math.max(8, Math.min(100, (completionStep / Math.max(1, stages.length)) * 100))}%`,
                   background: activeColor,
                 }}
                 className="h-full"
               />
             </div>
             <span className="text-[11px]" style={{ color: c.muted }}>
-              {step}/{stages.length}
+              {completionStep}/{stages.length}
             </span>
           </div>
         </td>
@@ -1804,6 +2014,16 @@ function TreeRow({
             >
               <Eye size={13} /> Open
             </button>
+            {onDownloadPdf && (
+              <button
+                onClick={() => onDownloadPdf(node)}
+                className="text-xs px-2 py-1 rounded flex items-center gap-1 hover:opacity-80"
+                style={{ color: activeColor, background: c.soft }}
+                title="Download PDF copy"
+              >
+                <Download size={13} /> PDF
+              </button>
+            )}
             {onDeleteRow && (
               <button
                 onClick={() => onDeleteRow(node)}
@@ -1910,6 +2130,7 @@ function TreeRow({
             tone={tone}
             onOpenRow={onOpenRow}
             onDeleteRow={onDeleteRow}
+            onDownloadPdf={onDownloadPdf}
             expandedSet={expandedSet}
             onToggle={onToggle}
             forceOpen={child.forceOpen}
@@ -1920,7 +2141,7 @@ function TreeRow({
   );
 }
 
-function WorkflowRow({ r, stages, tone, onOpenRow, onDeleteRow, forcedStepIndex }) {
+function WorkflowRow({ r, stages, tone, onOpenRow, onDeleteRow, onDownloadPdf, forcedStepIndex }) {
   const defaultStep =
     forcedStepIndex !== undefined ? forcedStepIndex : r.step - 1;
   const [selectedStep, setSelectedStep] = useState(defaultStep);
@@ -2063,6 +2284,15 @@ function WorkflowRow({ r, stages, tone, onOpenRow, onDeleteRow, forcedStepIndex 
         >
           Open Step {selectedStep + 1}
         </button>
+        {onDownloadPdf && (
+          <button
+            onClick={() => onDownloadPdf(r, selectedStep)}
+            style={{ color: activeColor }}
+            className="text-xs sm:text-sm font-medium hover:underline whitespace-nowrap ml-3"
+          >
+            PDF
+          </button>
+        )}
         {onDeleteRow && (
           <button
             onClick={() => onDeleteRow(r)}
@@ -2171,11 +2401,21 @@ function WorkflowPage({
   onAdd,
   onOpenRow,
   onDeleteRow,
+  onDownloadPdf,
   footnote,
   globalSearch = "",
 }) {
   const [filterStage, setFilterStage] = useState(null);
-  const [expandedSet, setExpandedSet] = useState(() => new Set());
+  const [expandedSet, setExpandedSet] = useState(() => {
+    const initial = new Set();
+    const collect = (nodes) =>
+      (nodes || []).forEach((n) => {
+        if (n.children && n.children.length) initial.add(n.id);
+        collect(n.children);
+      });
+    collect(rows);
+    return initial;
+  });
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const activeColor = tone === "inward" ? c.primary : "#7C3AED";
@@ -2443,6 +2683,7 @@ function WorkflowPage({
                       tone={tone}
                       onOpenRow={onOpenRow}
                       onDeleteRow={onDeleteRow}
+                      onDownloadPdf={onDownloadPdf}
                       expandedSet={expandedSet}
                       onToggle={toggleNode}
                       forceOpen={r.forceOpen}
@@ -2458,6 +2699,7 @@ function WorkflowPage({
                       tone={tone}
                       onOpenRow={onOpenRow}
                       onDeleteRow={onDeleteRow}
+                      onDownloadPdf={onDownloadPdf}
                       forcedStepIndex={
                         filterStage !== null ? filterStage : undefined
                       }
@@ -2527,6 +2769,7 @@ function FloatingForm({
   onUpdateChild,
   onSaveChild,
   onToggleChild,
+  onDownloadPdf,
   error,
   binOptions = [],
 }) {
@@ -3179,6 +3422,14 @@ function FloatingForm({
     Cancel
   </button>
   <button
+    onClick={() => onDownloadPdf && onDownloadPdf(form)}
+    style={{ color: tone, borderColor: tone }}
+    className="px-3 py-2 md:py-1.5 rounded-md border text-sm font-medium flex items-center gap-1.5 hover:opacity-80"
+    title="Download PDF copy of this form"
+  >
+    <Download size={14} /> PDF
+  </button>
+  <button
     onClick={() => onSaveCopy(form.id)}
     style={{ color: tone, borderColor: tone }}
     className="px-3.5 py-2 md:py-1.5 rounded-md border text-sm font-medium flex items-center gap-1.5 hover:opacity-80"
@@ -3729,8 +3980,87 @@ export default function App() {
   const [forms, setForms] = useState([]);
   const [formError, setFormError] = useState("");
   const [draftPrompt, setDraftPrompt] = useState(null);
-  const [appData, setAppData] = useState(initialAppData);
+  const [appData, setAppData] = useState(() => {
+    try {
+      const raw = localStorage.getItem("wms:appdata");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") return parsed;
+      }
+    } catch {
+      /* ignore corrupt cache */
+    }
+    return initialAppData;
+  });
+
+  // Persist saved records locally so imported/created data survives refresh.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem("wms:appdata", JSON.stringify(appData));
+      } catch {
+        /* storage may be unavailable */
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [appData]);
+
+  // Generated PDFs are cached locally (like the Recycle Bin) so they can be
+  // re-downloaded, soft-deleted, and restored even after a refresh.
+  const [pdfCache, setPdfCache] = useState(() => loadPdfCache());
+  useEffect(() => {
+    persistPdfCache(pdfCache);
+  }, [pdfCache]);
+
+  const cacheBlob = useCallback(async (blob, { title, docId, meta = {} }) => {
+    if (!blob) return;
+    const dataUrl = await blobToDataUrl(blob);
+    const fileName = `${String(title || "form").replace(/[^\w-]+/g, "_")}-${String(docId || "doc").replace(/[^\w-]+/g, "_")}.pdf`;
+    setPdfCache((prev) => [
+      {
+        id: `${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        title: String(title || "Document"),
+        docId: String(docId || fileName),
+        fileName,
+        dataUrl,
+        meta,
+        createdAt: new Date().toISOString(),
+        deletedAt: null,
+      },
+      ...prev,
+    ].slice(0, MAX_CACHE));
+  }, []);
+
+  const restoreCachedPdf = (id) =>
+    setPdfCache((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, deletedAt: null } : p)),
+    );
+
+  const deleteCachedPdf = (id) =>
+    setPdfCache((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, deletedAt: dateStamp() } : p)),
+    );
+
+  const deleteCachedPdfPermanent = (id) =>
+    setPdfCache((prev) => prev.filter((p) => p.id !== id));
+
+  const downloadCachedPdf = (entry) => {
+    if (!entry || !entry.dataUrl) return;
+    const a = document.createElement("a");
+    a.href = entry.dataUrl;
+    a.download = entry.fileName || `${entry.title}-${entry.docId}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
   const [savedWorkflowRows, setSavedWorkflowRows] = useState([]);
+  const [toasts, setToasts] = useState([]);
+  const notify = useCallback((message, tone = "info", duration = 3500) => {
+    const id = `${Date.now()}-${Math.random()}`;
+    setToasts((prev) => [...prev, { id, message, tone }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), duration);
+  }, []);
+  const dismissToast = (id) => setToasts((prev) => prev.filter((t) => t.id !== id));
   const [detail, setDetail] = useState(null);
   const idRef = useRef(0);
   const zRef = useRef(60);
@@ -3807,7 +4137,22 @@ export default function App() {
       const kids = byParent[rec.id] || [];
       nodesById[rec.id].children = kids.map((id) => nodesById[id]);
     });
+    // Chain progress: a node's completion reflects the deepest stage reached
+    // anywhere in its subtree, and deepestLabel names that document stage.
+    const annotate = (node) => {
+      node.children = (node.children || []).map(annotate);
+      node.progressStep = Math.max(
+        node.step,
+        ...(node.children || []).map((k) => k.progressStep),
+      );
+      node.deepestLabel = (node.children || []).reduce(
+        (acc, k) => (k.progressStep > acc.progressStep ? k : acc),
+        node,
+      ).stageLabel;
+      return node;
+    };
     const roots = (byParent["__root__"] || []).map((id) => nodesById[id]);
+    roots.forEach(annotate);
     return roots;
   }, [appData]);
 
@@ -3844,8 +4189,64 @@ export default function App() {
       const kids = byParent[rec.id] || [];
       nodesById[rec.id].children = kids.map((id) => nodesById[id]);
     });
+    // Chain progress: a node's completion reflects the deepest stage reached
+    // anywhere in its subtree, and deepestLabel names that document stage.
+    const annotate = (node) => {
+      node.children = (node.children || []).map(annotate);
+      node.progressStep = Math.max(
+        node.step,
+        ...(node.children || []).map((k) => k.progressStep),
+      );
+      node.deepestLabel = (node.children || []).reduce(
+        (acc, k) => (k.progressStep > acc.progressStep ? k : acc),
+        node,
+      ).stageLabel;
+      return node;
+    };
     const roots = (byParent["__root__"] || []).map((id) => nodesById[id]);
+    roots.forEach(annotate);
     return roots;
+  }, [appData]);
+
+  // Candidate consignments an imported mid-flow document can be linked to.
+  // Each entry exposes the chain so the parent (previous-stage record) for a
+  // newly imported stage document can be resolved on save.
+  const linkOptions = useMemo(() => {
+    const build = (flow) => {
+      const col = flow === "inward" ? "inward" : "outward";
+      const meta = flow === "inward" ? IN_STAGE_META : OUT_STAGE_META;
+      const stepOf = (rec) => {
+        const idx = meta.findIndex((m) => m.key === rec.type);
+        return idx >= 0 ? idx + 1 : 1;
+      };
+      const labelOf = (rec) => {
+        const m = meta.find((x) => x.key === rec.type);
+        return m ? m.label : rec.type;
+      };
+      const recs = appData[col] || [];
+      const roots = recs.filter((r) => !r.parentId);
+      return roots.map((root) => {
+        const chain = [];
+        const walk = (r) => {
+          chain.push(r);
+          recs.filter((x) => x.parentId === r.id).forEach(walk);
+        };
+        walk(root);
+        const deepest = chain.reduce((best, r) =>
+          stepOf(r) >= stepOf(best) ? r : best,
+        );
+        return {
+          rootId: root.id,
+          commonNumber: root.commonNumber,
+          party: root.customer || root.vendor || "—",
+          flow,
+          progressStep: stepOf(deepest),
+          deepestLabel: labelOf(deepest),
+          stageRecords: chain,
+        };
+      });
+    };
+    return { inward: build("inward"), outward: build("outward") };
   }, [appData]);
 
   // Dashboard summary stats computed from real data
@@ -4203,7 +4604,31 @@ export default function App() {
     }
 
     const values = form.values || {};
-    const collection = form.tone && form.tone.includes("inward") ? "inward" : "outward";
+    const collection = form.collection
+      ? form.collection
+      : form.tone && form.tone.includes("inward")
+        ? "inward"
+        : "outward";
+
+    // Simple forms (Bill, Invoice, Payment, Labour, MHE) persist into their own
+    // collections with flat column values rather than a workflow stage record.
+    if (!form.flowStages && form.collection && !MASTER_FORM_FIELDS[form.collection]) {
+      const fieldDefs = form.fields || STAGE_FIELDS[form.title] || [];
+      const record = {};
+      fieldDefs.forEach((fd) => {
+        record[fd.key] = String(
+          values[`${form.title}_${fd.key}`] ?? values[fd.key] ?? "",
+        ).trim();
+      });
+      setAppData((prev) => ({
+        ...prev,
+        [form.collection]: [...(prev[form.collection] || []), record],
+      }));
+      if (form.draftKey) deleteDraft(form.draftKey);
+      setFormError("");
+      closeForm(id);
+      return;
+    }
 
     // Build a primary-key record. If this is a workflow form, we create a stage record
     // keyed off the consignment's common number so it can be linked as a foreign key later.
@@ -4316,7 +4741,14 @@ export default function App() {
     });
   };
 
-  const openSimpleForm = (title, tone = "simple", hidePhoto = false, initialValues = {}, fields = null) => {
+  const openSimpleForm = (
+    title,
+    tone = "simple",
+    hidePhoto = false,
+    initialValues = {},
+    fields = null,
+    collection = null,
+  ) => {
     const draftKey = `s:${title}`;
     const values = { ...initialValues };
     const draft = readDraft(draftKey);
@@ -4330,7 +4762,17 @@ export default function App() {
       });
       restored = true;
     }
-    openForm({ kind: "simple", title, tone, hidePhoto, values, fields, draftKey, draftRestored: restored });
+    openForm({
+      kind: "simple",
+      title,
+      tone,
+      hidePhoto,
+      values,
+      fields,
+      collection,
+      draftKey,
+      draftRestored: restored,
+    });
   };
 
   // Open a draggable/minimizable floating form for a Master's add or edit.
@@ -4659,6 +5101,194 @@ export default function App() {
     setActivePage(pageId);
     setMobileNavOpen(false);
     setDetail(null);
+  };
+
+  // Field definitions keyed by their form/stage label, for the Import page.
+  const fieldsByLabel = useMemo(() => {
+    const map = {};
+    [...IN_STAGE_META, ...OUT_STAGE_META].forEach((meta) => {
+      map[meta.label] = STAGE_FIELDS[meta.label] || [];
+    });
+    ["Bill", "Invoice", "Payment", "Labour Attendance", "MHE Attendance"].forEach(
+      (label) => {
+        map[label] = STAGE_FIELDS[label] || [];
+      },
+    );
+    return map;
+  }, []);
+
+  // Import → open the matching pre-filled floating form.
+  const handleImportOpenForm = (doc, values, rootId = "") => {
+    const refined = {};
+    Object.entries(values || {}).forEach(([k, v]) => {
+      if (v !== undefined && v !== "") refined[k] = v;
+    });
+    const option =
+      isWorkflowDoc(doc) && rootId
+        ? (linkOptions[doc.flow] || []).find((o) => o.rootId === rootId)
+        : null;
+    if (option) {
+      const parent = parentForNewDoc(option, doc.stageIndex || 0);
+      refined.rootId = option.rootId;
+      if (parent) refined.parentId = parent.id;
+    }
+    if (isWorkflowDoc(doc)) {
+      const openWorkflow = doc.flow === "inward" ? openInwardForm : openOutwardForm;
+      openWorkflow(doc.stageIndex || 0, String(genBaseDoc()), undefined, refined);
+    } else {
+      openSimpleForm(
+        `New ${doc.label}`,
+        doc.tone || "simple",
+        true,
+        refined,
+        STAGE_FIELDS[doc.label] || null,
+        collectionForDocType(doc),
+      );
+    }
+  };
+
+  // Import → save extracted values straight into records.
+  const handleImportSaveDirect = (doc, values, rootId = "") => {
+    const refined = {};
+    Object.entries(values || {}).forEach(([k, v]) => {
+      if (v !== undefined && v !== "") refined[k] = v;
+    });
+    const collection = collectionForDocType(doc);
+    if (!collection) {
+      notify(`No save target for ${doc.label || "this document"}`, "error");
+      return;
+    }
+    const option =
+      isWorkflowDoc(doc) && rootId
+        ? (linkOptions[doc.flow] || []).find((o) => o.rootId === rootId)
+        : null;
+    const parent = option ? parentForNewDoc(option, doc.stageIndex || 0) : null;
+    const linked = option && parent ? ` · linked under ${option.rootId}` : "";
+    const recordId =
+      refined.id ||
+      (isWorkflowDoc(doc)
+        ? getStepDocNo(String(genBaseDoc()), doc.tone, doc.stageIndex || 0)
+        : `${String(doc.label || "DOC").replace(/\s+/g, "-").toUpperCase()}-${genBaseDoc()}`);
+    // Records store their stage fields top-level (not nested), so direct saves
+    // flatten the extracted values onto the record like form saves do. When a
+    // mid-flow document is linked, parentId/rootId place it inside the chosen
+    // consignment's tree.
+    const record = {
+      ...refined,
+      id: recordId,
+      type: isWorkflowDoc(doc)
+        ? (doc.flow === "inward" ? IN_TYPE_KEYS : OUT_TYPE_KEYS)[doc.stageIndex || 0]
+        : doc.key,
+      commonNumber: refined.commonNumber || `CN-${Date.now().toString().slice(-6)}`,
+      parentId: parent ? parent.id : refined.parentId,
+      rootId: option ? option.rootId : refined.rootId,
+      status: refined.status || "completed",
+      createdAt: new Date().toISOString().slice(0, 10),
+    };
+    setAppData((prev) => ({
+      ...prev,
+      [collection]: [...(prev[collection] || []), record],
+    }));
+    notify(
+      `Saved ${record.id} · ${doc.label}${isWorkflowDoc(doc) ? ` (${doc.flow === "inward" ? "Inward" : "Outward"} step ${(doc.stageIndex || 0) + 1})` : ""}${linked}. View it in ${COLLECTION_LABELS[collection] || collection}.`,
+      "success",
+    );
+    if (isWorkflowDoc(doc)) {
+      setSavedWorkflowRows((prev) => [
+        ...prev,
+        {
+          documentId: record.id,
+          docBase: doc.id || doc.key,
+          party: refined.vendor || refined.customer || "Imported",
+          ref: refined.vehicleNo || refined.ewayBill || "—",
+          step: (doc.stageIndex || 0) + 1,
+          stageLabel: doc.label,
+          tone: "primary",
+          flow: doc.flow,
+        },
+      ]);
+    }
+  };
+
+  const downloadDocPdf = (doc, values, docId, meta) =>
+    downloadFormPdf({
+      title: doc.label,
+      tone: FLOW_COLORS[doc.tone] || FLOW_COLORS.simple,
+      docId,
+      values,
+      fields: STAGE_FIELDS[doc.label] || [],
+      meta,
+      onGenerated: (blob) => cacheBlob(blob, { title: doc.label, docId, meta }),
+    });
+
+  const downloadRowPdf = (title, tone, columns, row, meta) => {
+    const fields = (columns || []).map((label) => ({
+      key: String(label).toLowerCase().replace(/\s+/g, "_"),
+      label,
+    }));
+    const values = {};
+    (columns || []).forEach((label, i) => {
+      values[String(label).toLowerCase().replace(/\s+/g, "_")] = row[i] ?? "";
+    });
+    downloadFormPdf({
+      title,
+      tone: FLOW_COLORS[tone] || FLOW_COLORS.simple,
+      docId: row[0] || `${title}-${String(genBaseDoc())}`,
+      fields,
+      values,
+      meta,
+      onGenerated: (blob) => cacheBlob(blob, { title, docId: row[0] || title, meta }),
+    });
+  };
+
+  const handleDownloadFormPdf = (form) => {
+    if (!form) return;
+    const stageLabel = form.flowStages
+      ? form.flowStages[form.stageIndex || 0]
+      : form.title;
+    const docId =
+      form.documentId ||
+      (form.flowStages && form.docBase
+        ? getStepDocNo(form.docBase, form.tone, form.stageIndex || 0)
+        : form.values && (form.values.id || form.values[`${stageLabel}_id`]));
+    const flattened = {};
+    const fields = form.fields || STAGE_FIELDS[stageLabel] || [];
+    (fields || []).forEach((f) => {
+      flattened[f.key] =
+        form.values[`${stageLabel}_${f.key}`] ?? form.values[f.key] ?? "";
+    });
+    const meta = {};
+    if (form.values.customer) meta["Customer"] = form.values.customer;
+    if (form.values.vendor) meta["Vendor"] = form.values.vendor;
+    if (form.values.vehicleNo) meta["Vehicle"] = form.values.vehicleNo;
+    if (form.values.commonNumber) meta["Batch"] = form.values.commonNumber;
+    downloadDocPdf(
+      { label: stageLabel, tone: form.tone },
+      flattened,
+      docId || `${stageLabel}-${String(genBaseDoc())}`,
+      meta,
+    );
+  };
+
+  const handleDownloadWorkflowRow = (flow, node, stepIdx) => {
+    if (!node) return;
+    const stages = flow === "inward" ? IN_STAGE_META : OUT_STAGE_META;
+    const step = stepIdx !== undefined ? stepIdx : (node.step && node.step - 1) || 0;
+    const meta = stages[step];
+    const docId = node.documentId || getStepDocNo(node.docBase || node.id, flow, step);
+    const record = (appData[flow] || []).find((r) => r.id === node.documentId || r.id === node.id);
+    const values = recordToValues(record, flow);
+    downloadDocPdf(
+      { label: meta ? meta.label : stages[0].label, tone: flow },
+      values,
+      docId,
+      {
+        [flow === "inward" ? "Customer / Vendor" : "Customer"]:
+          node.party && node.party !== "—" ? node.party : "",
+        [flow === "inward" ? "Vehicle" : "Reference"]:
+          node.ref && node.ref !== "—" ? node.ref : "",
+      },
+    );
   };
 
   return (
@@ -5119,8 +5749,30 @@ export default function App() {
                 outward={appData.outward}
                 inwardConsignments={appData.inwardConsignments}
                 outwardConsignments={appData.outwardConsignments}
+                onDownloadPdf={(row) => {
+                  const flow = row.type === "Inward" ? "inward" : "outward";
+                  const stages = flow === "inward" ? IN_STAGE_META : OUT_STAGE_META;
+                  const step = Math.max(0, stages.findIndex((s) => s.label === row.stage));
+                  handleDownloadWorkflowRow(
+                    flow,
+                    { documentId: row.doc, party: row.party, ref: row.party },
+                    step,
+                  );
+                }}
               />
             </div>
+          )}
+
+          {activePage === "import" && (
+            <ImportPage
+              fieldsByLabel={fieldsByLabel}
+              linkOptions={linkOptions}
+              onOpenForm={handleImportOpenForm}
+              onSaveDirect={handleImportSaveDirect}
+              onCachePdf={(blob, args) =>
+                args && cacheBlob(blob, { title: args.title, docId: args.docId, meta: args.meta })
+              }
+            />
           )}
 
           {activePage === "masters-customers" && (
@@ -5276,6 +5928,7 @@ export default function App() {
               }}
               footnote="Outward follows the same structure across its six stages."
               onDeleteRow={deleteConsignment}
+              onDownloadPdf={(node, stepIdx) => handleDownloadWorkflowRow("inward", node, stepIdx)}
             />
           )}
 
@@ -5303,6 +5956,7 @@ export default function App() {
               }}
               footnote="Inward mirrors this with its five stages."
               onDeleteRow={deleteConsignment}
+              onDownloadPdf={(node, stepIdx) => handleDownloadWorkflowRow("outward", node, stepIdx)}
             />
           )}
 
@@ -5333,6 +5987,9 @@ export default function App() {
               onAdd={() => openSimpleForm("New Bill", "simple", true, {}, STAGE_FIELDS["Bill"])}
               onEdit={(row) =>
                 openSimpleForm(`Edit Bill — ${row[0]}`, "simple", true, { amount: row[3], date: row[4], flow: row[5], customer: row[1] }, STAGE_FIELDS["Bill"])
+              }
+              onDownloadPdf={(row) =>
+                downloadRowPdf("Bill", "simple", ["Bill No.", "Customer", "Linked Doc.", "Amount", "Date", "Flow", "Status"], row)
               }
             />
           )}
@@ -5369,6 +6026,9 @@ export default function App() {
               ]}
               onAdd={() => openSimpleForm("New Invoice")}
               onEdit={(row) => openSimpleForm(`Edit Invoice — ${row[0]}`)}
+              onDownloadPdf={(row) =>
+                downloadRowPdf("Invoice", "simple", ["Invoice no.", "Customer", "Date", "Amount", "Status"], row)
+              }
             />
           )}
 
@@ -5398,6 +6058,9 @@ export default function App() {
               ]}
               onAdd={() => openSimpleForm("Record Payment")}
               onEdit={(row) => openSimpleForm(`Edit Payment — ${row[0]}`)}
+              onDownloadPdf={(row) =>
+                downloadRowPdf("Payment", "simple", ["Payment ID", "Customer", "Invoice ref.", "Amount", "Mode"], row)
+              }
             />
           )}
 
@@ -5517,6 +6180,9 @@ export default function App() {
                 onEdit={(row) =>
                   openSimpleForm(`Edit Attendance — ${row[0]}`, "simple")
                 }
+                onDownloadPdf={(row) =>
+                  downloadRowPdf("Labour Attendance", "simple", ["Worker ID", "Name", "Role / Vendor", "Shift", "Check-in", "Status"], row)
+                }
               />
 
               <CrudPage
@@ -5569,6 +6235,9 @@ export default function App() {
                 onAdd={() => openSimpleForm("MHE Attendance", "outward")}
                 onEdit={(row) =>
                   openSimpleForm(`Update MHE — ${row[0]}`, "outward")
+                }
+                onDownloadPdf={(row) =>
+                  downloadRowPdf("MHE Status", "outward", ["MHE Code", "Equipment Type", "Assigned Operator", "Fuel / Battery", "Hours Logged", "Status"], row)
                 }
               />
             </div>
@@ -5821,6 +6490,15 @@ export default function App() {
                 Deleted records are held here. Restore brings an item back; Delete
                 Permanently frees its name/code for reuse.
               </p>
+
+              <PdfCacheSection
+                pdfCache={pdfCache}
+                onDownload={downloadCachedPdf}
+                onDelete={deleteCachedPdf}
+                onRestore={restoreCachedPdf}
+                onPurge={deleteCachedPdfPermanent}
+              />
+
               {appData.trash.length === 0 ? (
                 <div
                   style={{ background: c.card, border: `1px solid ${c.border}` }}
@@ -5919,6 +6597,7 @@ export default function App() {
               onUpdateChild={updateChildForm}
               onSaveChild={saveChildForm}
               onToggleChild={toggleChildForm}
+              onDownloadPdf={handleDownloadFormPdf}
               error={formError}
               binOptions={appData.binsList || []}
             />
@@ -5989,6 +6668,7 @@ export default function App() {
           onClose={closeDetail}
         />
       )}
+      {toasts.length > 0 && <ToastStack toasts={toasts} onDismiss={dismissToast} />}
     </div>
   );
 }
