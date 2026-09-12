@@ -79,6 +79,28 @@ const CONF_TONES = { 3: "#188A5A", 2: "#C2790A", 1: "#6B7280", 0: "#9AA1AC" };
 let uid = 0;
 const nextId = () => `imp-${++uid}`;
 
+// Browser-side cache of a finished review so re-opening a pending item in the
+// same browser restores the last extraction without calling the OCR bot again.
+const reviewCacheKey = (id) => `rwms:review:${id}`;
+const loadCachedReview = (id) => {
+  try {
+    const raw = localStorage.getItem(reviewCacheKey(id));
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+const cacheReview = (id, data) => {
+  try {
+    localStorage.setItem(reviewCacheKey(id), JSON.stringify(data));
+  } catch {}
+};
+const dropReviewCache = (id) => {
+  try {
+    localStorage.removeItem(reviewCacheKey(id));
+  } catch {}
+};
+
 function timeAgo(iso) {
   if (!iso) return "";
   const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -529,7 +551,23 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
   const openPendingReview = (p) => {
     if (reviews.some((r) => r.pendingId === p.id)) return; // already open
     const ranks = detectDocType(p.fullText || "");
-    const fields = fieldsByLabel[ranks[0]?.label] || [];
+    // Prefer a finished extraction: Java write-backs come with top-level
+    // docKey/values/confidence, and the browser remembers the last reviewed
+    // state, so re-opening never re-hits the OCR bot.
+    const cached = loadCachedReview(p.id);
+    const backfilled =
+      p.docKey &&
+      DOC_TYPES.some((d) => d.key === p.docKey) &&
+      p.values &&
+      Object.keys(p.values).length
+        ? { docKey: p.docKey, values: p.values, confidence: p.confidence || {} }
+        : null;
+    const primed = (cached && cached.values) || backfilled;
+    const detectedDoc =
+      (primed && DOC_TYPES.find((d) => d.key === primed.docKey)) || ranks[0] || null;
+    const docKey = detectedDoc ? detectedDoc.key : "";
+    const fields = fieldsByLabel[detectedDoc?.label] || [];
+    const extracting = !primed;
     setReviews((prev) => [
       ...prev,
       {
@@ -537,17 +575,18 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
         fileName: p.fileName,
         fullText: p.fullText || "",
         pages: p.pages || [],
-        detected: ranks[0],
+        detected: detectedDoc,
         alternatives: ranks.slice(0, 4),
-        docKey: ranks[0]?.key || "",
+        docKey,
         fields,
-        values: {},
-        confidence: {},
-        parentLink: defaultLinkFor(ranks[0] || null),
-        extracting: true,
+        values: { ...(primed ? primed.values : {}) },
+        confidence: primed?.confidence || {},
+        parentLink: defaultLinkFor(detectedDoc),
+        extracting,
         image: null,
       },
     ]);
+    if (!extracting) return;
     // Pre-fill with the LLM without blocking the UI — the progress bar in the
     // ReviewPanel shows once it is done. For photos, first pull the stored
     // document image and let the vision model read it directly (OCR text on a
@@ -563,7 +602,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
           }
         } catch {}
       }
-      const ex = await extractFieldsSmart(p.fullText || "", ranks[0]?.label, fields, image);
+      const ex = await extractFieldsSmart(p.fullText || "", detectedDoc?.label, fields, image);
       // Only update this review; other open reviews keep their own state.
       setReviews((prev) =>
         prev.map((r) =>
@@ -578,15 +617,28 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
             : r,
         ),
       );
+      cacheReview(p.id, {
+        docKey,
+        values: { ...(ex.values || {}) },
+        confidence: ex.confidence || {},
+      });
     })();
   };
 
   const patchReview = (id, updater) =>
-    setReviews((prev) =>
-      prev.map((r) =>
-        r.pendingId === id ? (typeof updater === "function" ? updater(r) : { ...r, ...updater }) : r,
-      ),
-    );
+    setReviews((prev) => {
+      let updated = null;
+      const next = prev.map((r) => {
+        if (r.pendingId !== id) return r;
+        const merged = typeof updater === "function" ? updater(r) : { ...r, ...updater };
+        if (merged.values) {
+          updated = merged;
+        }
+        return merged;
+      });
+      if (updated) cacheReview(id, { docKey: updated.docKey, values: updated.values, confidence: updated.confidence || {} });
+      return next;
+    });
 
   const cancelReview = (id) => setReviews((prev) => prev.filter((r) => r.pendingId !== id));
 
@@ -602,6 +654,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
       : "";
     onSaveDirect(tDoc, target.values, link);
     if (target.pendingId) {
+      dropReviewCache(target.pendingId);
       fetch(`/api/imports/${target.pendingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -672,6 +725,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
   const setReviewParentLink = (value, id) => patchReview(id, { parentLink: value });
 
   const rejectPending = async (id) => {
+    dropReviewCache(id);
     fetch(`/api/imports/${id}`, { method: "DELETE" }).catch(() => {});
     setPendingItems((prev) => prev.filter((p) => p.id !== id));
     setReviews((prev) => prev.filter((r) => r.pendingId !== id));
