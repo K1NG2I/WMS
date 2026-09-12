@@ -5,13 +5,25 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
-    "dev": "node --watch index.js"
+    "dev": "node --watch index.js",
+    "bot": "node whatsapp/main.js",
+    "bot:simulate": "cross-env WHATSAPP_SIMULATE=1 node whatsapp/main.js",
+    "telegram": "node index.js",
+    "telegram:simulate": "node telegram/simulate.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "form-data": "^4.0.6",
     "multer": "^2.3.0",
     "mupdf": "^1.28.1",
-    "tesseract.js": "^7.0.0"
+    "node-fetch": "^3.3.2",
+    "node-telegram-bot-api": "^0.66.0",
+    "openai": "^7.15.0",
+    "sharp": "^0.35.4"
+  },
+  "devDependencies": {
+    "cross-env": "^10.1.0"
   }
 }

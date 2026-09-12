@@ -1,12 +1,15 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   FileUp,
   FileText,
   ScanLine,
+  Search,
   Download,
   Trash2,
   RotateCcw,
+  RefreshCw,
   Eye,
+  Send,
   Loader2,
   Check,
   AlertTriangle,
@@ -22,6 +25,40 @@ import {
   isWorkflowDoc,
 } from "./lib/import.js";
 import { downloadFormPdf } from "./lib/pdf.js";
+
+// Try NVIDIA LLM field extraction first; fall back to the regex extractor
+// if the API is unavailable or fails. When `image` (base64 data URL) is given,
+// the request hits the vision-capable nano-omni model which reads the doc
+// straight off the image — the source of truth for tilted photo scans.
+async function extractFieldsSmart(text, docLabel, fields, image) {
+  const fallback = () => extractFieldValues(text || "", fields || []);
+  if ((!text && !image) || !fields || !fields.length) return fallback();
+  try {
+    const res = await fetch("/api/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: text || "",
+        docLabel: docLabel || "",
+        fields,
+        image: image || undefined,
+      }),
+    });
+    if (!res.ok) return fallback();
+    const data = await res.json();
+    return { values: data.values || {}, confidence: data.confidence || {} };
+  } catch {
+    return fallback();
+  }
+}
+
+const fileToDataUrl = (file) =>
+  new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result || "");
+    reader.onerror = () => resolve("");
+    reader.readAsDataURL(file);
+  });
 
 const TONE_COLORS = { inward: "#2F6FED", outward: "#7C3AED", simple: "#334155" };
 const C = {
@@ -41,6 +78,17 @@ const CONF_TONES = { 3: "#188A5A", 2: "#C2790A", 1: "#6B7280", 0: "#9AA1AC" };
 
 let uid = 0;
 const nextId = () => `imp-${++uid}`;
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
 
 function Pill({ tone, children }) {
   const color = tone === "success" ? C.success : tone === "warn" ? "#C2790A" : C.faint;
@@ -76,11 +124,540 @@ function DocTypeSelect({ item, onChange }) {
   );
 }
 
+function SearchableLinkSelect({ options, value, onChange, accent }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+
+  const selected = options.find((o) => o.rootId === value) || null;
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) =>
+      `${o.rootId} ${o.party} ${o.commonNumber}`.toLowerCase().includes(q),
+    );
+  }, [query, options]);
+
+  const pick = (rootId) => {
+    onChange(rootId);
+    setOpen(false);
+    setQuery("");
+  };
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <input
+        type="text"
+        value={open ? query : ""}
+        placeholder={
+          selected
+            ? `${selected.rootId} · ${selected.party}`
+            : `Search by ID, party or common no. — ${options.length} available`
+        }
+        onFocus={() => setOpen(true)}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && filtered.length) pick(filtered[0].rootId);
+          if (e.key === "Escape") setOpen(false);
+        }}
+        style={{ borderColor: selected ? `${accent}66` : C.border, color: C.text }}
+        className="w-full px-3 py-2 pr-9 rounded-md border text-sm outline-none focus:ring-2 bg-white"
+      />
+      <Search
+        size={14}
+        className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none"
+        style={{ color: C.faint }}
+      />
+      {open && (
+        <div
+          className="absolute left-0 right-0 top-full mt-1 z-20 max-h-64 overflow-y-auto rounded-md border bg-white shadow-lg"
+          style={{ borderColor: C.border }}
+        >
+          {filtered.length ? (
+            filtered.map((opt) => {
+              const isActive = opt.rootId === value;
+              return (
+                <button
+                  key={opt.rootId}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => pick(opt.rootId)}
+                  className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-gray-50"
+                  style={{ background: isActive ? `${accent}0D` : "transparent" }}
+                >
+                  <span className="flex-1 min-w-0 flex flex-col">
+                    <span className="text-xs font-semibold truncate" style={{ color: C.text }}>
+                      {opt.rootId} · {opt.party}
+                    </span>
+                    <span className="text-[11px] truncate" style={{ color: C.muted }}>
+                      {opt.commonNumber} · step {opt.progressStep}/6 {opt.deepestLabel}
+                    </span>
+                  </span>
+                  {isActive && <Check size={14} style={{ color: accent }} className="flex-shrink-0" />}
+                </button>
+              );
+            })
+          ) : (
+            <p className="px-3 py-2 text-xs" style={{ color: C.faint }}>
+              No matching consignment for “{query}”.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// LLM extraction is a single HTTP call, so true progress isn't available.
+// Drive an animated 0-100 bar while a task key is truthy; it climbs toward
+// ~92% and resets to 0 once the key becomes falsy (work finished).
+function useFakeProgress(activeKey) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (!activeKey) {
+      setValue(0);
+      return undefined;
+    }
+    setValue(5);
+    const id = setInterval(() => {
+      setValue((cur) => (cur >= 92 ? 92 : cur + Math.max(0.4, (94 - cur) * 0.055)));
+    }, 250);
+    return () => clearInterval(id);
+  }, [activeKey]);
+  return value;
+}
+
+function ProgressBar({ value }) {
+  return (
+    <div
+      className="w-full h-2 rounded-full overflow-hidden"
+      style={{ background: C.surface, border: `1px solid ${C.border}` }}
+    >
+      <div
+        className="h-full rounded-full transition-all duration-300"
+        style={{
+          width: `${Math.max(0, Math.min(100, value))}%`,
+          background: "linear-gradient(90deg, #2F6FED, #7C3AED)",
+        }}
+      />
+    </div>
+  );
+}
+
+// Shared review panel used both for queued uploads and for For Approval items
+// (Telegram). Everything is driven by props so both call sites look identical.
+function ReviewPanel({
+  fileName,
+  fullText,
+  pages = [],
+  detected,
+  alternatives = [],
+  docKey,
+  selectedDoc,
+  selectedFields = [],
+  values = {},
+  confidence = {},
+  parentLink = "",
+  showLink = false,
+  linkCandidates = [],
+  tone,
+  extracting = false,
+  progress = 0,
+  onChangeDocType,
+  onSetValue,
+  onClear,
+  onRemove,
+  onSetParentLink,
+  onDownloadPdf,
+  onSave,
+  onOpenForm,
+  onClose,
+  hideRemove = false,
+}) {
+  return (
+    <div className="rounded-md border overflow-hidden" style={{ borderColor: C.border, background: C.card }}>
+      {extracting && (
+        <div className="px-4 py-3 border-b flex flex-col gap-2" style={{ borderColor: C.border }}>
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium flex items-center gap-2" style={{ color: C.muted }}>
+              <Loader2 size={13} className="animate-spin" style={{ color: C.primary }} />
+              Extracting fields…
+            </span>
+            <span className="text-xs font-semibold" style={{ color: C.primary }}>
+              {Math.round(progress || 0)}%
+            </span>
+          </div>
+          <ProgressBar value={progress || 0} />
+        </div>
+      )}
+
+      <div className="px-4 py-3 flex items-center justify-between" style={{ background: C.surface, borderBottom: `1px solid ${C.border}` }}>
+        <div>
+          <div style={{ color: C.muted }} className="text-[10px] font-semibold uppercase tracking-wider">
+            Document review · {fileName}
+          </div>
+          <div className="flex items-center gap-2 mt-1">
+            <span style={{ background: `${tone}18`, color: tone }} className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase">
+              {selectedDoc ? selectedDoc.label : "Unknown type"}
+            </span>
+            {detected && (
+              <span style={{ color: C.muted }} className="text-[11px]">
+                detected ~{detected.score} pts
+              </span>
+            )}
+            <span style={{ color: C.faint }} className="text-[11px]">
+              saves to: {selectedDoc ? (COLLECTION_LABELS[selectedDoc.collection] || selectedDoc.collection) : "—"}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onClear}
+            style={{ color: C.muted, borderColor: C.border }}
+            className="px-2.5 py-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 hover:bg-gray-50"
+          >
+            <RotateCcw size={12} /> Reset values
+          </button>
+          {!hideRemove && (
+            <button
+              onClick={onRemove}
+              style={{ color: C.danger, borderColor: C.border }}
+              className="px-2.5 py-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 hover:bg-red-50"
+            >
+              <Trash2 size={12} /> Remove
+            </button>
+          )}
+          {onClose && (
+            <button
+              onClick={onClose}
+              title="Close review"
+              style={{ color: C.danger, borderColor: C.border }}
+              className="px-2.5 py-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 hover:bg-red-50"
+            >
+              <Trash2 size={12} /> Cancel
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="p-4 border-b flex flex-col gap-3" style={{ borderColor: C.border }}>
+        {alternatives.length > 1 && (
+          <div className="flex flex-wrap gap-1.5">
+            {alternatives.map((alt) => {
+              const isActive = docKey === alt.key;
+              return (
+                <button
+                  key={alt.key}
+                  onClick={() => onChangeDocType(alt.key)}
+                  className="text-[11px] font-medium px-2 py-1 rounded-full border"
+                  style={{
+                    borderColor: isActive ? TONE_COLORS[alt.tone] : C.border,
+                    background: isActive ? `${TONE_COLORS[alt.tone]}14` : "transparent",
+                    color: isActive ? TONE_COLORS[alt.tone] : C.muted,
+                  }}
+                >
+                  {alt.label}
+                  {alt.score > 4 ? " · likely" : ""}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <div className="max-w-md">
+          <DocTypeSelect item={{ docKey }} onChange={onChangeDocType} />
+        </div>
+      </div>
+
+      {showLink && (
+        <div className="p-4 border-b flex flex-col gap-2.5" style={{ borderColor: C.border }}>
+          <div style={{ color: C.muted }} className="text-[10px] font-semibold uppercase tracking-wider">
+            Link to transaction (step {(selectedDoc.stageIndex || 0) + 1} of the {selectedDoc.flow === "inward" ? "Inward" : "Outward"} flow)
+          </div>
+          {linkCandidates.length ? (
+            <>
+              <SearchableLinkSelect
+                options={linkCandidates}
+                value={parentLink}
+                onChange={onSetParentLink}
+                accent={tone}
+              />
+              <label
+                onClick={() => onSetParentLink("")}
+                className="inline-flex items-center gap-2 cursor-pointer select-none self-start"
+              >
+                <input
+                  type="checkbox"
+                  checked={parentLink === ""}
+                  onChange={() => onSetParentLink("")}
+                  className="accent-[#2F6FED]"
+                />
+                <span style={{ color: C.muted }} className="text-xs font-medium">
+                  Standalone — no consignment link
+                </span>
+              </label>
+            </>
+          ) : (
+            <p style={{ color: C.faint }} className="text-xs">
+              No existing {selectedDoc.flow} consignments to link to.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="p-4 flex flex-col gap-3">
+        <div className="flex items-center justify-between">
+          <h5 style={{ color: C.text }} className="text-sm font-semibold">
+            {selectedDoc ? selectedDoc.label : "Select a document type"} fields
+          </h5>
+          <span style={{ color: C.muted }} className="text-xs">
+            {selectedFields.length} field{selectedFields.length === 1 ? "" : "s"} · OCR confidence in brackets
+          </span>
+        </div>
+        {selectedFields.length ? (
+          <div className="flex flex-col gap-2">
+            {selectedFields.map((field) => {
+              const conf = confidence[field.key] || 0;
+              const hasValue = (values[field.key] || "").trim() !== "";
+              return (
+                <div key={field.key} className="flex items-center gap-3">
+                  <label style={{ color: C.muted }} className="w-40 sm:w-52 flex-shrink-0 text-xs font-medium truncate" title={field.label}>
+                    {field.label}
+                    <span className="ml-1 text-[10px] font-semibold" style={{ color: CONF_TONES[conf] || CONF_TONES[0] }}>
+                      {CONF_LABELS[conf]}
+                    </span>
+                  </label>
+                  <input
+                    type={field.type === "date" ? "date" : "text"}
+                    value={values[field.key] || ""}
+                    placeholder={field.placeholder || `Enter ${field.label.toLowerCase()}`}
+                    onChange={(e) => onSetValue(field.key, e.target.value)}
+                    style={{
+                      borderColor: hasValue ? `${tone}66` : C.border,
+                      color: C.text,
+                    }}
+                    className="flex-1 px-3 py-2 rounded-md border text-sm outline-none focus:ring-2"
+                  />
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p style={{ color: C.faint }} className="text-sm">
+            No field definitions for this type yet.
+          </p>
+        )}
+
+        <details className="mt-1">
+          <summary style={{ color: C.primary }} className="text-xs font-medium cursor-pointer select-none">
+            View raw OCR text ({pages.length} page{pages.length === 1 ? "" : "s"})
+          </summary>
+          <pre
+            className="mt-2 rounded-md border p-3 text-[11px] leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto"
+            style={{ borderColor: C.border, background: C.surface, color: C.muted, fontFamily: "ui-monospace, monospace" }}
+          >
+            {fullText || "No text extracted."}
+          </pre>
+        </details>
+      </div>
+
+      <div className="px-4 py-3 flex items-center justify-end gap-2 flex-wrap" style={{ borderTop: `1px solid ${C.border}`, background: C.surface }}>
+        <button
+          onClick={onDownloadPdf}
+          style={{ color: C.muted, borderColor: C.border }}
+          className="px-3 py-2 rounded-md border text-xs font-medium flex items-center gap-1.5 hover:bg-gray-50"
+        >
+          <Download size={13} /> Download PDF
+        </button>
+        <button
+          onClick={onSave}
+          style={{ color: C.primary, borderColor: C.primary }}
+          className="px-3 py-2 rounded-md border text-xs font-semibold flex items-center gap-1.5 hover:opacity-80"
+        >
+          <Save size={13} /> Save record
+        </button>
+        <button
+          onClick={onOpenForm}
+          style={{ background: tone }}
+          className="px-3.5 py-2 rounded-md text-xs font-semibold text-white flex items-center gap-1.5 hover:opacity-90"
+        >
+          <FolderOpen size={13} /> Open {selectedDoc ? selectedDoc.label : "form"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpenForm, onSaveDirect, onCachePdf }) {
   const [items, setItems] = useState([]);
   const [dragging, setDragging] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
+  const [pendingItems, setPendingItems] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [review, setReview] = useState(null);
   const inputRef = useRef(null);
+
+  const fetchPending = async () => {
+    try {
+      const res = await fetch("/api/imports?status=unapproved");
+      if (!res.ok) return;
+      setPendingItems(await res.json());
+    } catch {}
+  };
+
+  useEffect(() => { fetchPending(); }, []);
+  useEffect(() => {
+    const id = setInterval(fetchPending, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  const openPendingReview = (p) => {
+    const ranks = detectDocType(p.fullText || "");
+    const fields = fieldsByLabel[ranks[0]?.label] || [];
+    setReview({
+      pendingId: p.id,
+      fileName: p.fileName,
+      fullText: p.fullText || "",
+      pages: p.pages || [],
+      detected: ranks[0],
+      alternatives: ranks.slice(0, 4),
+      docKey: ranks[0]?.key || "",
+      fields,
+      values: {},
+      confidence: {},
+      parentLink: defaultLinkFor(ranks[0] || null),
+      extracting: true,
+      image: null,
+    });
+    // Pre-fill with the LLM without blocking the UI — the progress bar in the
+    // ReviewPanel shows once it is done. For photos, first pull the stored
+    // document image and let the vision model read it directly (OCR text on a
+    // tilted photo often grabs keyboard/desktop noise instead).
+    (async () => {
+      let image = null;
+      if (p.mime && p.mime.startsWith("image/")) {
+        try {
+          const res = await fetch(`/api/imports/${p.id}/image`);
+          if (res.ok) {
+            const data = await res.json();
+            image = data.image || null;
+          }
+        } catch {}
+      }
+      const ex = await extractFieldsSmart(p.fullText || "", ranks[0]?.label, fields, image);
+      setReview((prev) =>
+        prev && prev.pendingId === p.id
+          ? {
+              ...prev,
+              values: { ...(ex.values || {}) },
+              confidence: ex.confidence || {},
+              extracting: false,
+              image,
+            }
+          : prev,
+      );
+    })();
+  };
+
+  const cancelReview = () => setReview(null);
+
+  const saveReview = () => {
+    if (!review || !reviewDoc) return;
+    const link = reviewLinkCandidates.some((o) => o.rootId === review.parentLink)
+      ? review.parentLink
+      : "";
+    onSaveDirect(reviewDoc, review.values, link);
+    if (review.pendingId) {
+      fetch(`/api/imports/${review.pendingId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "approved" }),
+      }).catch(() => {});
+    }
+    setPendingItems((prev) => prev.filter((p) => p.id !== review.pendingId));
+    setReview(null);
+  };
+
+  const changeReviewDocType = (key) => {
+    const doc = DOC_TYPES.find((d) => d.key === key);
+    if (!doc || !review) return;
+    const newFields = fieldsByLabel[doc.label] || [];
+    const extraction = extractFieldValues(review.fullText || "", newFields);
+    const values = { ...extraction.values };
+    // Preserve any manual edits for fields that still exist in the new type.
+    newFields.forEach((f) => {
+      if (
+        review.values[f.key] !== undefined &&
+        review.values[f.key] !== null &&
+        review.values[f.key] !== ""
+      ) {
+        values[f.key] = review.values[f.key];
+      }
+    });
+    setReview((prev) =>
+      prev && {
+        ...prev,
+        docKey: key,
+        fields: newFields,
+        values,
+        confidence: extraction.confidence,
+        parentLink: defaultLinkFor(doc),
+        extracting: !!prev.image,
+      },
+    );
+    // A photo's OCR text is unreliable; when a document image is stored,
+    // re-run extraction against the vision model so changing the doc type
+    // triggers a proper re-scan instead of re-reading garble.
+    if (review.image) {
+      extractFieldsSmart(review.fullText || "", doc.label, newFields, review.image).then((ex) => {
+        setReview((prev) =>
+          prev && prev.docKey === key
+            ? {
+                ...prev,
+                values: { ...(ex.values || {}) },
+                confidence: ex.confidence || {},
+                extracting: false,
+              }
+            : prev,
+        );
+      });
+    }
+  };
+
+  const clearReview = () => {
+    if (!review) return;
+    const extraction = extractFieldValues(review.fullText || "", review.fields || []);
+    setReview((prev) =>
+      prev && {
+        ...prev,
+        values: { ...extraction.values },
+        confidence: extraction.confidence,
+      },
+    );
+  };
+
+  const setReviewValue = (key, value) =>
+    setReview((prev) => prev && { ...prev, values: { ...prev.values, [key]: value } });
+
+  const setReviewParentLink = (value) =>
+    setReview((prev) => prev && { ...prev, parentLink: value });
+
+  const rejectPending = async (id) => {
+    fetch(`/api/imports/${id}`, { method: "DELETE" }).catch(() => {});
+    setPendingItems((prev) => prev.filter((p) => p.id !== id));
+    setReview((prev) => (prev && prev.pendingId === id ? null : prev));
+  };
 
   const patch = (id, partial) =>
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...partial } : it)));
@@ -103,13 +680,9 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
       throw new Error(data.error || `Server responded ${res.status}`);
     }
     const payload = await res.json();
-
     const ranks = detectDocType(payload.fullText || "");
-    const extraction = extractFieldValues(
-      payload.fullText || "",
-      fieldsByLabel[ranks[0]?.label] || [],
-    );
-
+    const fields = fieldsByLabel[ranks[0]?.label] || [];
+    const extraction = extractFieldValues(payload.fullText || "", fields);
     patch(itemId, {
       status: "done",
       pages: payload.pages || [],
@@ -117,11 +690,27 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
       detected: ranks[0],
       alternatives: ranks.slice(0, 4),
       docKey: ranks[0]?.key,
-      fields: fieldsByLabel[ranks[0]?.label] || [],
+      fields,
       values: { ...(extraction.values || {}) },
       confidence: extraction.confidence || {},
       parentLink: defaultLinkFor(ranks[0] || null),
+      visionPending: file.type.startsWith("image/"),
     });
+    if (file.type.startsWith("image/")) {
+      try {
+        const image = await fileToDataUrl(file);
+        const visionEx = await extractFieldsSmart(
+          payload.fullText || "", ranks[0]?.label, fields, image,
+        );
+        patch(itemId, {
+          values: { ...(visionEx.values || {}) },
+          confidence: visionEx.confidence || {},
+          visionPending: false,
+        });
+      } catch {
+        patch(itemId, { visionPending: false });
+      }
+    }
   };
 
   const enqueueFiles = (fileList) => {
@@ -132,6 +721,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
     const newItems = incoming.map((file) => ({
       id: nextId(),
       fileName: file.name,
+      file,
       status: "queued",
       message: "",
       pages: [],
@@ -159,7 +749,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
     });
   };
 
-  const changeDocType = (itemId, key) => {
+  const changeDocType = async (itemId, key) => {
     const item = items.find((it) => it.id === itemId);
     const doc = DOC_TYPES.find((d) => d.key === key);
     if (!item || !doc) return;
@@ -173,6 +763,19 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
       }
     });
     patch(itemId, { docKey: key, fields, values, confidence: extraction.confidence, parentLink: defaultLinkFor(doc) });
+    // Photo uploads: OCR text can be desktop/keyboard noise, so a doc-type
+    // change re-scans the original image through the vision model.
+    if (item.file && item.file.type.startsWith("image/")) {
+      patch(itemId, { status: "ocr", message: "Re-scanning with vision model…" });
+      const image = await fileToDataUrl(item.file);
+      const ex = await extractFieldsSmart(item.fullText || "", doc.label, fields, image);
+      patch(itemId, {
+        status: "done",
+        message: "",
+        values: { ...(ex.values || {}) },
+        confidence: ex.confidence || {},
+      });
+    }
   };
 
   const setValue = (itemId, key, value) => {
@@ -220,6 +823,17 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
     selectedDoc && isWorkflowDoc(selectedDoc) && (selectedDoc.stageIndex || 0) > 0;
   const linkCandidates = showLink ? (linkOptions[selectedDoc.flow] || []) : [];
   const setParentLink = (value) => patch(active.id, { parentLink: value });
+
+  // Derived state for the inline For Approval review (Telegram items).
+  const reviewDoc = review ? DOC_TYPES.find((d) => d.key === review.docKey) : null;
+  const reviewFields = reviewDoc ? fieldsByLabel[reviewDoc.label] || [] : [];
+  const reviewTone = reviewDoc ? TONE_COLORS[reviewDoc.tone] : "#334155";
+  const reviewShowLink =
+    reviewDoc && isWorkflowDoc(reviewDoc) && (reviewDoc.stageIndex || 0) > 0;
+  const reviewLinkCandidates = reviewShowLink ? (linkOptions[reviewDoc.flow] || []) : [];
+  const reviewProgress = useFakeProgress(
+    review && review.extracting ? `rev:${review.pendingId}` : "",
+  );
 
   return (
     <div className="flex flex-col gap-5">
@@ -273,6 +887,138 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
         />
       </div>
 
+      {/* For Approval — Telegram / WhatsApp / external queue */}
+      {(pendingItems.length > 0 || review) && (
+        <div className="rounded-md border overflow-hidden" style={{ borderColor: C.border, background: C.card }}>
+          <div className="px-4 py-3 flex items-center justify-between" style={{ background: "#FFF8ED", borderBottom: `1px solid ${C.border}` }}>
+            <div className="flex items-center gap-2">
+              <span
+                className="w-2 h-2 rounded-full animate-pulse"
+                style={{ background: "#C2790A" }}
+              />
+              <span style={{ color: "#8B5E1A" }} className="text-sm font-semibold">
+                For Approval ({pendingItems.some((p) => p.source === "telegram") ? "Telegram" : "WhatsApp"})
+              </span>
+              <span
+                className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                style={{ background: "#C2790A1A", color: "#C2790A" }}
+              >
+                {pendingItems.filter((p) => !review || p.id !== review.pendingId).length}
+              </span>
+            </div>
+            <button
+              onClick={fetchPending}
+              style={{ color: "#8B5E1A", borderColor: "#E5D5B0" }}
+              className="px-2 py-1 rounded border text-[11px] font-medium flex items-center gap-1 hover:bg-orange-50"
+            >
+              <RefreshCw size={11} /> Refresh
+            </button>
+          </div>
+          <div className="flex flex-col gap-0">
+            {pendingItems
+              .filter((pi) => !review || pi.id !== review.pendingId)
+              .map((pi) => {
+                const detected = detectDocType(pi.fullText || "");
+                const doc = detected.length ? DOC_TYPES.find((d) => d.key === detected[0].key) : null;
+                return (
+                  <div
+                    key={pi.id}
+                    className="flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0"
+                    style={{ borderColor: C.border }}
+                  >
+                    <FileText size={15} style={{ color: doc ? TONE_COLORS[doc.tone] : C.faint }} />
+                    <span className="text-xs font-medium truncate flex-1 min-w-0" style={{ color: C.text }}>
+                      {pi.fileName}
+                    </span>
+                    {pi.sender && (
+                      <span style={{ color: C.muted }} className="text-[11px] truncate max-w-[120px]">
+                        {pi.sender}
+                      </span>
+                    )}
+                    {pi.group && (
+                      <span style={{ color: C.faint }} className="text-[11px] truncate max-w-[120px] hidden sm:inline">
+                        {pi.group}
+                      </span>
+                    )}
+                    {doc && (
+                      <span
+                        className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded flex-shrink-0"
+                        style={{ background: `${TONE_COLORS[doc.tone]}1A`, color: TONE_COLORS[doc.tone] }}
+                      >
+                        {doc.label}
+                      </span>
+                    )}
+                    <Pill tone="warn">Unapproved</Pill>
+                    <span style={{ color: C.faint }} className="text-[10px] flex-shrink-0 whitespace-nowrap">
+                      {timeAgo(pi.receivedAt)}
+                    </span>
+                    <button
+                      onClick={() => openPendingReview(pi)}
+                      style={{ color: C.primary, borderColor: C.border }}
+                      className="px-2 py-1 rounded border text-[11px] font-medium flex items-center gap-1 hover:bg-gray-50 flex-shrink-0"
+                    >
+                      <Eye size={12} /> Review
+                    </button>
+                    <button
+                      onClick={() => rejectPending(pi.id)}
+                      style={{ color: C.danger, borderColor: C.border }}
+                      className="px-2 py-1 rounded border flex items-center gap-1 hover:bg-red-50 flex-shrink-0"
+                      title="Reject"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+
+            {review && (
+              <ReviewPanel
+                fileName={review.fileName}
+                fullText={review.fullText}
+                pages={review.pages || []}
+                detected={review.detected}
+                alternatives={review.alternatives || []}
+                docKey={review.docKey}
+                selectedDoc={reviewDoc}
+                selectedFields={reviewFields}
+                values={review.values}
+                confidence={review.confidence}
+                parentLink={review.parentLink}
+                showLink={reviewShowLink}
+                linkCandidates={reviewLinkCandidates}
+                tone={reviewTone}
+                extracting={review.extracting}
+                progress={reviewProgress}
+                onChangeDocType={changeReviewDocType}
+                onSetValue={setReviewValue}
+                onClear={clearReview}
+                onRemove={cancelReview}
+                hideRemove
+                onClose={cancelReview}
+                onSetParentLink={setReviewParentLink}
+                onDownloadPdf={() =>
+                  reviewDoc &&
+                  downloadFormPdf({
+                    title: reviewDoc.label,
+                    tone: reviewTone,
+                    docId: review.values[reviewFields[0]?.key] || "IMPORT",
+                    fields: reviewFields,
+                    values: review.values,
+                    meta: { Source: review.fileName, Status: "Imported" },
+                    onGenerated: (blob, args) => onCachePdf && onCachePdf(blob, args),
+                  })
+                }
+                onSave={saveReview}
+                onOpenForm={() => {
+                  if (!reviewDoc) return;
+                  onOpenForm(reviewDoc, review.values, review.parentLink || "");
+                }}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
       {items.length > 0 && (
         <div className="flex flex-col gap-4">
           {/* Import queue */}
@@ -302,8 +1048,11 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
                   </span>
                   {item.status === "ocr" && (
                     <span style={{ color: C.muted }} className="text-[11px]">
-                      Reading document…
+                      {item.message || "Reading document…"}
                     </span>
+                  )}
+                  {item.status === "done" && item.visionPending && (
+                    <Loader2 size={12} className="animate-spin" style={{ color: C.primary }} />
                   )}
                   {item.status === "done" && doc && (
                     <>
@@ -345,250 +1094,60 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
 
           {/* Review panel for the active import */}
           {active && active.status === "done" && (
-            <div
-              className="rounded-md border overflow-hidden"
-              style={{ borderColor: C.border, background: C.card }}
-            >
-              <div className="px-4 py-3 flex items-center justify-between" style={{ background: C.surface, borderBottom: `1px solid ${C.border}` }}>
-                <div>
-                  <div style={{ color: C.muted }} className="text-[10px] font-semibold uppercase tracking-wider">
-                    Document review · {active.fileName}
-                  </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <span style={{ background: `${tone}18`, color: tone }} className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase">
-                      {selectedDoc ? selectedDoc.label : "Unknown type"}
-                    </span>
-                    {active.detected && (
-                      <span style={{ color: C.muted }} className="text-[11px]">
-                        detected ~{active.detected.score} pts
-                      </span>
-                    )}
-                    <span style={{ color: C.faint }} className="text-[11px]">
-                      saves to: {selectedDoc ? (COLLECTION_LABELS[selectedDoc.collection] || selectedDoc.collection) : "—"}
-                    </span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => clear(active.id)}
-                    style={{ color: C.muted, borderColor: C.border }}
-                    className="px-2.5 py-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 hover:bg-gray-50"
-                  >
-                    <RotateCcw size={12} /> Reset values
-                  </button>
-                  <button
-                    onClick={() => remove(active.id)}
-                    style={{ color: C.danger, borderColor: C.border }}
-                    className="px-2.5 py-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 hover:bg-red-50"
-                  >
-                    <Trash2 size={12} /> Remove
-                  </button>
-                </div>
-              </div>
-
-              {/* Detection alternatives + type picker */}
-              <div className="p-4 border-b flex flex-col gap-3" style={{ borderColor: C.border }}>
-                {active.alternatives.length > 1 && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {active.alternatives.map((alt) => {
-                      const isActive = active.docKey === alt.key;
-                      return (
-                        <button
-                          key={alt.key}
-                          onClick={() => changeDocType(active.id, alt.key)}
-                          className="text-[11px] font-medium px-2 py-1 rounded-full border"
-                          style={{
-                            borderColor: isActive ? TONE_COLORS[alt.tone] : C.border,
-                            background: isActive ? `${TONE_COLORS[alt.tone]}14` : "transparent",
-                            color: isActive ? TONE_COLORS[alt.tone] : C.muted,
-                          }}
-                        >
-                          {alt.label}
-                          {alt.score > 4 ? " · likely" : ""}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                <div className="max-w-md">
-                  <DocTypeSelect item={active} onChange={(key) => changeDocType(active.id, key)} />
-                </div>
-              </div>
-
-              {/* Link mid-flow document to an existing transaction */}
-              {showLink && (
-                <div className="p-4 border-b flex flex-col gap-2.5" style={{ borderColor: C.border }}>
-                  <div style={{ color: C.muted }} className="text-[10px] font-semibold uppercase tracking-wider">
-                    Link to transaction (step {(selectedDoc.stageIndex || 0) + 1} of the {selectedDoc.flow === "inward" ? "Inward" : "Outward"} flow)
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    {linkCandidates.map((opt) => {
-                      const isActive = active.parentLink === opt.rootId;
-                      return (
-                        <label
-                          key={opt.rootId}
-                          onClick={() => setParentLink(opt.rootId)}
-                          className="rounded-md border px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-gray-50"
-                          style={{
-                            borderColor: isActive ? C.primary : C.border,
-                            background: isActive ? `${C.primary}0D` : C.card,
-                          }}
-                        >
-                          <input
-                            type="radio"
-                            name="parentLink"
-                            checked={isActive}
-                            onChange={() => setParentLink(opt.rootId)}
-                            className="accent-[#2F6FED]"
-                          />
-                          <span className="flex-1 flex flex-col">
-                            <span className="text-xs font-semibold" style={{ color: C.text }}>
-                              {opt.rootId} · {opt.party}
-                            </span>
-                            <span className="text-[11px]" style={{ color: C.muted }}>
-                              {opt.commonNumber} · {opt.progressStep}/6 {opt.deepestLabel}
-                            </span>
-                          </span>
-                          <span className="text-[10px] uppercase font-bold" style={{ color: opt.flow === "inward" ? "#2F6FED" : "#7C3AED" }}>
-                            {opt.flow === "inward" ? "Inward" : "Outward"}
-                          </span>
-                        </label>
-                      );
-                    })}
-                    <label
-                      onClick={() => setParentLink("")}
-                      className="rounded-md border px-3 py-2 flex items-center gap-2 cursor-pointer hover:bg-gray-50"
-                      style={{
-                        borderColor: active.parentLink === "" ? C.primary : C.border,
-                        background: active.parentLink === "" ? `${C.primary}0D` : C.card,
-                      }}
-                    >
-                      <input
-                        type="radio"
-                        name="parentLink"
-                        checked={active.parentLink === ""}
-                        onChange={() => setParentLink("")}
-                        className="accent-[#2F6FED]"
-                      />
-                      <span style={{ color: C.text }} className="text-xs font-medium">
-                        Standalone — no consignment link
-                      </span>
-                    </label>
-                  </div>
-                  {linkCandidates.length === 0 && (
-                    <p style={{ color: C.faint }} className="text-xs">
-                      No existing {selectedDoc.flow} consignments to link to.
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {/* Field mapping table */}
-              <div className="p-4 flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <h5 style={{ color: C.text }} className="text-sm font-semibold">
-                    {selectedDoc ? selectedDoc.label : "Select a document type"} fields
-                  </h5>
-                  <span style={{ color: C.muted }} className="text-xs">
-                    {selectedFields.length} field{selectedFields.length === 1 ? "" : "s"} · OCR confidence in brackets
-                  </span>
-                </div>
-                {selectedFields.length ? (
-                  <div className="flex flex-col gap-2">
-                    {selectedFields.map((field) => {
-                      const conf = active.confidence[field.key] || 0;
-                      const hasValue = (active.values[field.key] || "").trim() !== "";
-                      return (
-                        <div key={field.key} className="flex items-center gap-3">
-                          <label style={{ color: C.muted }} className="w-40 sm:w-52 flex-shrink-0 text-xs font-medium truncate" title={field.label}>
-                            {field.label}
-                            <span className="ml-1 text-[10px] font-semibold" style={{ color: CONF_TONES[conf] || CONF_TONES[0] }}>
-                              {CONF_LABELS[conf]}
-                            </span>
-                          </label>
-                          <input
-                            type={field.type === "date" ? "date" : "text"}
-                            value={active.values[field.key] || ""}
-                            placeholder={field.placeholder || `Enter ${field.label.toLowerCase()}`}
-                            onChange={(e) => setValue(active.id, field.key, e.target.value)}
-                            style={{
-                              borderColor: hasValue ? `${tone}66` : C.border,
-                              color: C.text,
-                            }}
-                            className="flex-1 px-3 py-2 rounded-md border text-sm outline-none focus:ring-2"
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p style={{ color: C.faint }} className="text-sm">
-                    No field definitions for this type yet.
-                  </p>
-                )}
-
-                {/* Raw text */}
-                <details className="mt-1">
-                  <summary style={{ color: C.primary }} className="text-xs font-medium cursor-pointer select-none">
-                    View raw OCR text ({active.pages.length} page{active.pages.length === 1 ? "" : "s"})
-                  </summary>
-                  <pre
-                    className="mt-2 rounded-md border p-3 text-[11px] leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto"
-                    style={{ borderColor: C.border, background: C.surface, color: C.muted, fontFamily: "ui-monospace, monospace" }}
-                  >
-                    {active.fullText || "No text extracted."}
-                  </pre>
-                </details>
-              </div>
-
-              {/* Actions */}
-              <div className="px-4 py-3 flex items-center justify-end gap-2 flex-wrap" style={{ borderTop: `1px solid ${C.border}`, background: C.surface }}>
-                <button
-                  onClick={() =>
-                    selectedDoc &&
-                    downloadFormPdf({
-                      title: selectedDoc.label,
-                      tone,
-                      docId: active.values[selectedFields[0]?.key] || "IMPORT",
-                      fields: selectedFields,
-                      values: active.values,
-                      meta: { Source: active.fileName, Status: "Imported" },
-                      onGenerated: (blob, args) => onCachePdf && onCachePdf(blob, args),
-                    })
-                  }
-                  style={{ color: C.muted, borderColor: C.border }}
-                  className="px-3 py-2 rounded-md border text-xs font-medium flex items-center gap-1.5 hover:bg-gray-50"
-                >
-                  <Download size={13} /> Download PDF
-                </button>
-                <button
-                  onClick={() => {
-                    if (!selectedDoc) return;
-                    const link = linkCandidates.some(
-                      (o) => o.rootId === active.parentLink,
-                    )
-                      ? active.parentLink
-                      : "";
-                    onSaveDirect(selectedDoc, active.values, link);
-                    consume(active.id);
-                  }}
-                  style={{ color: C.primary, borderColor: C.primary }}
-                  className="px-3 py-2 rounded-md border text-xs font-semibold flex items-center gap-1.5 hover:opacity-80"
-                >
-                  <Save size={13} /> Save record
-                </button>
-                <button
-                  onClick={() => {
-                    if (!selectedDoc) return;
-                    onOpenForm(selectedDoc, active.values, active.parentLink || "");
-                  }}
-                  style={{ background: tone }}
-                  className="px-3.5 py-2 rounded-md text-xs font-semibold text-white flex items-center gap-1.5 hover:opacity-90"
-                >
-                  <FolderOpen size={13} /> Open {selectedDoc ? selectedDoc.label : "form"}
-                </button>
-              </div>
-            </div>
+            <ReviewPanel
+              fileName={active.fileName}
+              fullText={active.fullText}
+              pages={active.pages || []}
+              detected={active.detected}
+              alternatives={active.alternatives || []}
+              docKey={active.docKey}
+              selectedDoc={selectedDoc}
+              selectedFields={selectedFields}
+              values={active.values}
+              confidence={active.confidence}
+              parentLink={active.parentLink}
+              showLink={showLink}
+              linkCandidates={linkCandidates}
+              tone={tone}
+              onChangeDocType={(key) => changeDocType(active.id, key)}
+              onSetValue={(key, value) => setValue(active.id, key, value)}
+              onClear={() => clear(active.id)}
+              onRemove={() => remove(active.id)}
+              onSetParentLink={setParentLink}
+              onDownloadPdf={() =>
+                selectedDoc &&
+                downloadFormPdf({
+                  title: selectedDoc.label,
+                  tone,
+                  docId: active.values[selectedFields[0]?.key] || "IMPORT",
+                  fields: selectedFields,
+                  values: active.values,
+                  meta: { Source: active.fileName, Status: "Imported" },
+                  onGenerated: (blob, args) => onCachePdf && onCachePdf(blob, args),
+                })
+              }
+              onSave={() => {
+                if (!selectedDoc) return;
+                const link = linkCandidates.some(
+                  (o) => o.rootId === active.parentLink,
+                )
+                  ? active.parentLink
+                  : "";
+                onSaveDirect(selectedDoc, active.values, link);
+                if (active.sourcePendingId) {
+                  fetch(`/api/imports/${active.sourcePendingId}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ status: "approved" }),
+                  }).catch(() => {});
+                }
+                consume(active.id);
+              }}
+              onOpenForm={() => {
+                if (!selectedDoc) return;
+                onOpenForm(selectedDoc, active.values, active.parentLink || "");
+              }}
+            />
           )}
 
           {/* Imported doc-type summary */}

@@ -1,27 +1,51 @@
 import mupdf from "mupdf";
-import { createWorker } from "tesseract.js";
+import { preprocessImage } from "./preprocess.js";
 
-// A scanned document (no text layer) needs OCR. This threshold is deliberately
-// low: anything with a meaningful embedded text layer is used as-is (faster and
-// far more accurate than OCR), everything else is rasterized + OCR'd.
 const MIN_TEXT_TOKENS = 6;
+const GOOGLE_VISION_URL = "https://vision.googleapis.com/v1/images:annotate";
+const GOOGLE_API_KEY = process.env.GOOGLE_VISION_API_KEY || "";
 
-let workerPromise = null;
-function getWorker() {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const worker = await createWorker("eng");
-      return worker;
-    })();
+async function ocrBuffer(buffer, { preprocessed = false } = {}) {
+  if (!GOOGLE_API_KEY) {
+    throw new Error("GOOGLE_VISION_API_KEY not set. Add it to server/.env or environment.");
   }
-  return workerPromise;
+  return ocrProcessed(preprocessed ? buffer : await preprocessImage(buffer));
 }
 
-async function ocrBuffer(buffer) {
-  const worker = await getWorker();
-  const { data } = await worker.recognize(buffer);
-  return { text: data.text || "", confidence: data.confidence || 0 };
+async function ocrProcessed(processed) {
+  const base64 = processed.toString("base64");
+  const body = {
+    requests: [
+      {
+        image: { content: base64 },
+        features: [
+          { type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 },
+        ],
+      },
+    ],
+  };
+
+  const res = await fetch(`${GOOGLE_VISION_URL}?key=${GOOGLE_API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `Google Vision API error: ${res.status}`);
+  }
+
+  const data = await res.json();
+  const annotation = data.responses?.[0]?.fullTextAnnotation;
+  const text = annotation?.text || "";
+  const confidence = annotation?.pages?.[0]?.confidence
+    ? Math.round(annotation.pages[0].confidence * 100)
+    : 70;
+
+  return { text: text.trim(), confidence };
 }
+
 export { ocrBuffer };
 
 function extractEmbeddedText(page) {
@@ -56,8 +80,6 @@ async function pageToText(doc, index, renderScale = 2) {
   };
 }
 
-// Extract text from a PDF buffer. Each page either yields its embedded text
-// layer (preferred) or is rendered to an image and OCR'd.
 export async function extractPdfPages(buffer, { onProgress } = {}) {
   const doc = mupdf.Document.openDocument(buffer);
   const count = doc.countPages();

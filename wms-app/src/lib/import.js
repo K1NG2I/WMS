@@ -131,6 +131,30 @@ function trySpecial(fullText, field) {
     .split(/\n+/)
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean);
+
+  // For date fields, only match dates that appear near the field label
+  // (within a few lines) to avoid picking up timestamps from "Generated" lines.
+  if (field.key === "expectedDate" || field.key === "date" || field.key === "expiryDate") {
+    const labelLow = field.label.toLowerCase();
+    const labelTokens = anchorTokens(field.label);
+    for (let i = 0; i < lines.length; i++) {
+      const lineLow = lines[i].toLowerCase();
+      // Check if this line contains the field label (or close match).
+      const nearLabel = labelTokens.every((t) => lineLow.includes(t)) ||
+        labelTokens.reduce((s, t) => s + (lineLow.includes(t) ? 1 : 0), 0) >= labelTokens.length - 1;
+      if (!nearLabel) continue;
+      // Search this line and the next 3 lines for a date.
+      for (let j = i; j < Math.min(i + 4, lines.length); j++) {
+        const dateRe = /\b(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\s?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s?\d{2,4})\b/i;
+        const found = dateRe.exec(lines[j]);
+        if (found && found[1]) {
+          return { value: found[1].trim(), confidence: 3 };
+        }
+      }
+    }
+    return null;
+  }
+
   for (const pattern of SPECIAL_FIELD_PATTERNS) {
     if (!pattern.keys.includes(field.key)) continue;
     for (const raw of lines) {
@@ -223,6 +247,7 @@ export function extractFieldValues(fullText, fields = []) {
     return line.split(/\s+/).filter(Boolean).length <= Math.max(2, tokens.length + 1) &&
       matchesLabelLine(line, tokens);
   };
+  const SECTION_HEADER_RE = /^(?:value|field|label|details|status|sr\.?\s*no|s\.?no|description|remarks|notes)$/i;
   for (let i = 0; i < lines.length - 1; i++) {
     const norm = lines[i].toLowerCase();
     for (const entry of index) {
@@ -233,20 +258,147 @@ export function extractFieldValues(fullText, fields = []) {
       if (tokensMatch || nearMatch >= floor) {
         const next = lines[i + 1];
         const nextNorm = next.trim();
+        const nextLow = next.toLowerCase().trim();
         const isOtherLabel = index.some(
-          (e) => e !== entry && matchesLabelLine(next.toLowerCase(), e.tokens),
+          (e) => e !== entry && matchesLabelLine(nextLow, e.tokens),
         );
-        const isOwnLabel = lineIsOwnLabel(next.toLowerCase(), entry.tokens);
+        const isOwnLabel = lineIsOwnLabel(nextLow, entry.tokens);
         if (
           nextNorm &&
           nextNorm.length <= 60 &&
           !/[:#]/.test(next) &&
           !isOwnLabel &&
-          !isOtherLabel
+          !isOtherLabel &&
+          !SECTION_HEADER_RE.test(nextLow)
         ) {
           values[entry.field.key] = nextNorm;
           confidence[entry.field.key] = 1;
           break;
+        }
+      }
+    }
+  }
+
+  // Pass 4: parallel-column table layout.
+  // In scanned PDFs with a table layout, OCR reads top-to-bottom, left-to-right,
+  // so all labels appear as consecutive lines, then all values appear as consecutive
+  // lines. The nth label corresponds to the nth value. This pass pairs them up.
+  const unmatchedFields = index.filter((e) => !confidence[e.field.key]);
+  if (unmatchedFields.length > 0) {
+    // Try to find section headers like "FIELD" and "VALUE" that delimit the
+    // label column from the value column in table-style forms.
+    // Handle OCR misreads: FILD, FIE LD, FIE1D, FRED → FIELD; VAIUE, VA1UE → VALUE.
+    const normalizeForHeader = (w) => w.replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e").replace(/5/g, "s").replace(/8/g, "b");
+    const isFieldHeader = (w) => {
+      const n = normalizeForHeader(w);
+      return /^f.{1,4}d$/i.test(n) && n.length >= 4 && n.length <= 6;
+    };
+    const isValueHeader = (w) => {
+      const n = normalizeForHeader(w);
+      return /^v.{1,4}e$/i.test(n) && n.length >= 4 && n.length <= 6;
+    };
+    let labelSectionStart = -1;
+    let valueSectionStart = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i].trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (isFieldHeader(raw) || raw === "label" || raw === "labels") {
+        labelSectionStart = i + 1;
+      }
+      if (isValueHeader(raw) || raw === "values" || raw === "details") {
+        valueSectionStart = i + 1;
+      }
+    }
+
+    if (labelSectionStart >= 0 && valueSectionStart >= 0) {
+      // We have explicit sections — pair by position within them.
+      const NOISE_RE = /^(?:alt|ctrl|shift|tab|esc|fn|del|ins|home|end|pgup|pgdn|enter|space|backspace|caps|num|scroll|prt?sc|bs|bksp)$/i;
+      const META_RE = /(?:prepared|checked|generated|authorized|signatory|wms|prototype|document no|party ref)/i;
+      const labelSection = lines.slice(labelSectionStart, valueSectionStart)
+        .map((l) => l.trim()).filter(Boolean);
+      const valueSection = lines.slice(valueSectionStart)
+        .map((l) => l.trim())
+        .filter((l) =>
+          l &&
+          !NOISE_RE.test(l) &&
+          !(l.split(/\s+/).length === 1 && l.length <= 3) &&
+          !META_RE.test(l)
+        );
+
+      // Match each unmatched field to a label line, then pair with the
+      // corresponding value line by position.
+      for (let i = 0; i < unmatchedFields.length; i++) {
+        const entry = unmatchedFields[i];
+        if (confidence[entry.field.key]) continue;
+        // Find this field's label in the label section.
+        const labelIdx = labelSection.findIndex((l) => {
+          const low = l.toLowerCase();
+          return entry.tokens.every((t) => low.includes(t));
+        });
+        if (labelIdx >= 0 && labelIdx < valueSection.length) {
+          values[entry.field.key] = valueSection[labelIdx];
+          confidence[entry.field.key] = 1;
+        }
+      }
+    } else {
+      // No explicit section headers — fall back to finding label lines
+      // and collecting remaining value-like lines, then pairing by position.
+      const labelLineIndices = new Set();
+      for (const entry of unmatchedFields) {
+        for (let i = 0; i < lines.length; i++) {
+          if (labelLineIndices.has(i)) continue;
+          const norm = lines[i].toLowerCase();
+          const tokensMatch = entry.tokens.every((t) => norm.includes(t));
+          const nearMatch = entry.tokens.reduce((s, t) => s + (norm.includes(t) ? 1 : 0), 0);
+          const floor = entry.tokens.length >= 2 ? Math.max(2, entry.tokens.length - 1) : 1;
+          if (tokensMatch || nearMatch >= floor) {
+            labelLineIndices.add(i);
+            break;
+          }
+        }
+      }
+      // Also mark lines that look like labels for already-matched fields.
+      for (const entry of index) {
+        if (!confidence[entry.field.key]) continue;
+        for (let i = 0; i < lines.length; i++) {
+          if (labelLineIndices.has(i)) continue;
+          const norm = lines[i].toLowerCase();
+          if (entry.tokens.every((t) => norm.includes(t))) {
+            labelLineIndices.add(i);
+            break;
+          }
+        }
+      }
+      // Collect value-candidate lines.
+      const SKIP_RE = /^(value|field|details|status|prepared|checked|generated|authorized|signatory|wms|goods|document|party|reference|no\.?|date)$/i;
+      const HEADER_RE = /^(?:pre gate inward|gate inward|checklist|quality|good receipt|pick list|dispatch|outward|invoice|payment|bill|labour|mhe)/i;
+      const DOC_HEADER_RE = /^(?:good inward|goods inward|warehouse management|documentation record|gate inward|pre gate)/i;
+      const META_RE = /(?:prepared|checked|generated|authorized|signatory|wms|prototype|document no|party ref)/i;
+      // Common OCR noise: keyboard keys, single-char gibberish, etc.
+      const NOISE_RE = /^(?:alt|ctrl|shift|tab|esc|fn|del|ins|home|end|pgup|pgdn|enter|space|backspace|caps|num|scroll|prt?sc|bs|bksp)$/i;
+      // Collect already-extracted values to avoid re-matching them.
+      const extractedValues = new Set(Object.values(values).map((v) => v.toLowerCase()));
+      const valueCandidates = [];
+      for (let i = 0; i < lines.length; i++) {
+        if (labelLineIndices.has(i)) continue;
+        const raw = lines[i].trim();
+        if (!raw || raw.length > 60 || /[:#]/.test(raw)) continue;
+        if (SKIP_RE.test(raw) || HEADER_RE.test(raw) || DOC_HEADER_RE.test(raw)) continue;
+        if (/^[A-Z\s\-\/]{4,}$/.test(raw)) continue;
+        // Skip noise words (keyboard keys, single-char gibberish).
+        if (NOISE_RE.test(raw)) continue;
+        // Skip single short tokens that are unlikely to be real values.
+        if (raw.split(/\s+/).length === 1 && raw.length <= 3) continue;
+        // Skip metadata lines (prepared by, generated, etc.).
+        if (META_RE.test(raw)) continue;
+        // Skip lines that are already extracted as values for other fields.
+        if (extractedValues.has(raw.toLowerCase())) continue;
+        valueCandidates.push({ index: i, text: raw });
+      }
+      for (let i = 0; i < unmatchedFields.length && i < valueCandidates.length; i++) {
+        const entry = unmatchedFields[i];
+        if (!confidence[entry.field.key]) {
+          values[entry.field.key] = valueCandidates[i].text;
+          confidence[entry.field.key] = 1;
         }
       }
     }

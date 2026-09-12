@@ -5350,7 +5350,7 @@ export default function App() {
         <div className="flex-1 overflow-y-auto py-3 flex flex-col gap-0.5">
           {NAV.map((item) => {
             const isParentActive =
-              section === item.label ||
+              activePage === item.id ||
               (item.children &&
                 item.children.some((ch) => ch.id === activePage));
             return (
