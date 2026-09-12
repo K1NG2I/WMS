@@ -5,30 +5,69 @@ Warehouse Management System prototype with a PDF import pipeline (OCR + vision-b
 - **Frontend**: React 19 + Vite + Tailwind CSS 4
 - **Backend**: Node.js + Express microservice (`server/`) + serverless API on Vercel (`api/`)
 - **OCR / Vision**: Google Vision (text), MuPDF (PDF → text/image), NVIDIA NIM (field extraction)
+- **Event pipeline**: Java 21 + Spring Boot (WebFlux/Reactor) + Apache Kafka + PostgreSQL (R2DBC) + MinIO
 - **Live demo**: https://wms-app-orpin.vercel.app
 
-> Note: UI data is persisted in browser `localStorage` (`wms:appdata`, `wms:pdfcache`, `wms:drafts`). This is a prototype — the backend will become a .NET service in the main app.
+> Note: UI data is persisted in browser `localStorage` (`wms:appdata`, `wms:pdfcache`, `wms:drafts`). This is a prototype.
 
-## Requirements
+---
+
+## Stack overview
+
+```text
+  React + Vite (localhost:5173)          Live site: wms-app-orpin.vercel.app
+        │  /api (dev proxy)                        │  serverless /api/*
+        ▼                                          
+   Node OCR service (localhost:4001) ───────────────────────────────► Vercel function (sync OCR only)
+        │  POST /api/ingest
+        ▼
+   Kafka: document.received ──► Java worker (Spring WebFlux/Reactor)
+        │                          ├─ GET presigned MinIO object
+        │                          ├─ POST /api/import/ocr (Node)
+        │                          ├─ classifier (17 doc types)
+        │                          ├─ POST /api/extract (NVIDIA)
+        │                          ├─ Postgres: document_processing (idempotent)
+        │                          └─ PATCH /api/imports/:id (back-fill queue)
+        ▼
+   ImportPage (local)  ◄── results back-filled
+        ▲
+        └── mirror.mjs ◄── pushes local COMPLETED items ─► live Vercel queue
+```
+
+There are two processing paths:
+
+1. **Synchronous** (default, on Vercel too): upload → OCR → extract → queue. No Kafka/Java needed.
+2. **Event-driven** (local `docker compose` stack): ingest → MinIO + Kafka → Java worker → results back-filled; optionally **mirrored** to the live Vercel site.
+
+---
+
+## How to run it
+
+### Prerequisites
 
 - Node.js `^20.19.0` or `>=22.12.0` (Vite 8)
-- API keys for OCR/extraction (see `.env.example`)
+- Docker + Docker Compose (only for the Kafka/Java pipeline)
+- API keys for OCR/extraction (see [Keys](#2-add-keys) below)
 
-## Local setup
-
-Install both the app and the OCR service dependencies:
+### 1. Clone & install
 
 ```bash
-cd wms-app/wms-app
-npm install
+git clone git@github.com:Kulkarni-Yash/WMS.git
+cd WMS/wms-app/wms-app
+
+npm install        # frontend
 cd server
-npm install
+npm install        # OCR service + Kafka producer + bots
+cd ..
 ```
 
-Create `server/.env` with your keys (copy `.env.example`):
+### 2. Add keys
 
-```
+Create `server/.env` (the server loads it with `dotenv`; it is git-ignored):
+
+```bash
 GOOGLE_VISION_API_KEY=...
+TELEGRAM_BOT_TOKEN=...            # optional: enables the Telegram bot
 NVIDIA_API_KEY=...
 NVIDIA_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
 NVIDIA_API_KEY_FALLBACK=...
@@ -37,69 +76,120 @@ NVIDIA_API_KEY_FALLBACK2=...
 NVIDIA_MODEL_FALLBACK2=nvidia/nemotron-3-ultra-550b-a55b
 ```
 
-## Run locally
+> `GOOGLE_VISION` / `NVIDIA` keys are needed for scanned-document OCR and field
+> extraction. The same names go in the Vercel production env vars for the live
+> site (see [Deploy on Vercel](#deploy-on-vercel)).
+
+### 3. Run
 
 **Terminal 1 — OCR service (port 4001):**
 
 ```bash
-cd wms-app/wms-app/server
+cd server
 npm start          # or `npm run dev` for file-watch reload
 ```
 
-Verify: `curl localhost:4001/api/health`
+Verify: `curl localhost:4001/api/health` → `{"ok":true,...}`
+
+The Telegram bot starts automatically with this server when `TELEGRAM_BOT_TOKEN`
+is set. If your network blocks Telegram (e.g. VPN/Firewall), you'll see
+`polling error: connect ETIMEDOUT 149.154.166.110:443` — turn the VPN/firewall
+off or allowlist `api.telegram.org:443`. The bot auto-restarts polling on
+transient failures (`EFATAL`), so it recovers without a manual restart.
 
 **Terminal 2 — app (port 5173):**
 
 ```bash
-cd wms-app/wms-app
 npm run dev
 ```
 
-Open http://localhost:5173 — the Vite dev server proxies `/api` → `http://localhost:4001`.
+Open http://localhost:5173 — Vite proxies `/api` → `http://localhost:4001`.
+This works without Docker.
 
-**Bots** (optional): `npm run bot` (WhatsApp) and `npm run telegram` in `server/`. The Telegram bot starts automatically with the OCR server and posts received documents into the import queue.
-
-## Deploy on Vercel
-
-The repo is set up for serverless deployment (framework: Vite, root dir `wms-app/wms-app`).
-
-1. Import `github.com/Kulkarni-Yash/WMS` in the Vercel dashboard.
-2. Set **Root Directory** to `wms-app/wms-app`.
-3. Add the production env vars (same names as `.env.example`).
-4. Deploy.
-
-Or from the CLI:
+### 4. Optional — event-driven pipeline (Docker): Kafka + Java + Postgres + MinIO
 
 ```bash
-vercel login
-vercel link          # links to kulkarni619y-7518/wms-app
-vercel env add <NAME> production   # for each key
-vercel --prod
+# Terminal 3 — the compose stack (Kafka KRaft, Postgres 16, MinIO, Java worker)
+docker compose up --build
 ```
 
-The `api/index.js` Express app serves all `/api/*` routes as a serverless function (see `vercel.json`). No external DB: the import queue writes to `/tmp` on Vercel (resets on cold start) and to `server/data/pending.json` locally.
+Start the OCR server again, this time telling Node to emit MinIO-hosted
+presigned URLs (the Java container can't reach `localhost:9000`):
 
-## API endpoints
+```bash
+cd server
+S3_PUBLIC_ENDPOINT=http://minio:9000 npm start
+```
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/api/health` | Service health |
-| POST | `/api/import/ocr` | Upload PDF/PNG/JPEG → OCR text |
-| POST | `/api/extract` | `{ text?, image?, docLabel, fields }` → extracted values + confidence (NVIDIA NIM) |
-| POST | `/api/ingest` | Multipart upload → object storage + Kafka `document.received` (async processing) |
-| GET | `/api/imports?status=unapproved` | Import queue |
-| POST | `/api/imports` | Multipart upload into queue (legacy, used by bots) |
-| PATCH | `/api/imports/:id` | Approve/update a queued import (also used by Java write-back) |
-| DELETE | `/api/imports/:id` | Remove a queued import |
-| GET | `/api/imports/:id/image` | Stored document image |
+Feed a document through the pipeline (or send it via the Telegram bot):
 
-Upload cap: 12MB local / ~4MB on Vercel (Hobby body limit).
+```bash
+curl -F "file=@pdfs/Gate_Inward-GT-102.pdf" http://localhost:4001/api/ingest
+```
 
-## Event-Driven Document Processing (Kafka + Java)
+Watch the Java logs for the trace `DocumentReceived → ProcessingStarted →
+OCRStarted/OCRCompleted → Classified → ExtractionStarted/ExtractionCompleted →
+PersistenceCompleted → Publish document.processed → Writing back to RWMS queue`.
 
-Beyond the synchronous `/api/imports` path, the prototype has an asynchronous,
-event-driven pipeline built on **Java 21 + Spring Boot (WebFlux) + Reactor +
-Apache Kafka + PostgreSQL**, which keeps the OLD endpoints and UI fully intact.
+Verify persistence and the back-filled queue item:
+
+```bash
+docker compose exec postgres psql -U rwms -c \
+  "SELECT document_id, status, retry_count, result_json FROM document_processing ORDER BY id;"
+
+curl -s "http://localhost:4001/api/imports?status=unapproved"
+```
+
+### 5. Optional — mirror processed docs to the live Vercel site
+
+The deployed ImportPage reads the Vercel function's own `/tmp` queue, so locally
+processed documents aren't visible there by default. `mirror.mjs` pushes
+local `COMPLETED` items up to `POST /api/mirror` (stores them verbatim, no
+re-OCR; idempotent — an item is replaced by its id):
+
+```bash
+cd server
+npm run mirror    # watches the local queue, targets wms-app-orpin.vercel.app
+```
+
+### 6. Optional — concurrency burst (Kafka demo)
+
+```bash
+cd server
+npm run burst     # publishes 4 DocumentReceived events
+```
+
+`document.received` has 3 partitions and the listener runs 3 concurrent
+consumers, so documents process in parallel and each lands as exactly one
+`COMPLETED` row. Run twice: replays are dropped by the idempotency guard.
+
+### Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| Telegram `connect ETIMEDOUT 149.154.166.110:443` | VPN/firewall blocks Telegram — switch it off or allowlist `api.telegram.org:443` |
+| Java worker can't fetch the document | Node must run with `S3_PUBLIC_ENDPOINT=http://minio:9000 npm start` during compose runs |
+| `ERR_MODULE_NOT_FOUND` on restart | re-run `npm install` in `server/` |
+| Docs appear locally but not on the live site | run `npm run mirror` (or the Vercel function cold-started and its `/tmp` queue reset) |
+
+---
+
+## Event-driven architecture (why Kafka, Java, Reactor)
+
+- **Kafka** decouples ingestion from processing: components scale independently,
+  events replay after crashes, and the topic gives natural at-least-once
+  semantics that the idempotency guard handles explicitly.
+- **Reactor / WebFlux** keeps the pipeline non-blocking end to end (HTTP to Node
+  OCR/NVIDIA, Postgres, Kafka) — one thread can serve thousands of documents.
+- **Java + PostgreSQL (R2DBC)** gives durable, orderable per-document state —
+  a realistic foundation for the eventual production rewrite.
+- **Idempotency**: `documentId` (`imp-<uuid8>`) is the key; a
+  `UNIQUE(document_id)` row in Postgres makes the first delivery win.
+- **Retries**: transient failures (network, 5xx, timeouts) retry with backoff
+  (max 3); permanent failures (blank/bad PDF, validation) fail fast and emit
+  `document.failed`. Every step is logged against `documentId` via `ProcessingLog`.
+
+### Pipeline
 
 ```text
   WhatsApp / Telegram bot ──┐
@@ -118,101 +208,59 @@ Apache Kafka + PostgreSQL**, which keeps the OLD endpoints and UI fully intact.
                                                            └─────────────────────────────────────┘
 ```
 
-- **Why Kafka (not a queue/SQL poll)?** Decouples ingestion from processing:
-  each component scales independently, events are replayed after crashes, and a
-  single topic gives natural at-least-once semantics we handle explicitly.
-- **Why Reactor (WebFlux)?** The pipeline is mostly I/O (HTTP to Node
-  OCR/NVIDIA, Postgres, Kafka). A single thread serving thousands of concurrent
-  documents is the real point of reactive code here — no thread-per-document.
-- **Why Java + Postgres?** Per-document durable state, orderable querying, and a
-  realistic foundation for the production .NET/other rewrite.
-- **Idempotency:** `documentId` (`imp-<uuid8>`) is the idempotency key. Kafka
-  redelivers; a `UNIQUE(document_id)` row in Postgres makes the first delivery
-  win and drops later duplicates (including terminal `COMPLETED`/`FAILED`).
-- **Retries:** transient failures (network, 5xx, OCR/extraction timeouts) retry
-  with backoff (max 3 attempts); permanent failures (bad/blank PDF, validation)
-  fail fast and emit `document.failed`. Everything is logged against
-  `documentId` via `ProcessingLog` (single trace per document).
+### Outbox
 
-### Run the event-driven stack
+If Kafka is unreachable when a document ingests, the event is persisted to a
+durable outbox and retried every 5s until the broker is back — the queue item
+is always created first, so nothing is lost.
 
-Requirements: Docker + Docker Compose, and the Node server running on port 4001.
+---
 
-```bash
-# 1. Start Kafka (KRaft), PostgreSQL, MinIO, and build+run the Java service
-cd wms-app/wms-app
-docker compose up --build
+## API endpoints
 
-# 2. In another terminal, start the Node OCR service (bots + /api/ingest)
-cd wms-app/wms-app/server
-npm install          # first time (kafkajs, @aws-sdk/*)
-npm start            # port 4001
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/api/health` | Service health |
+| POST | `/api/import/ocr` | Upload PDF/PNG/JPEG → OCR text |
+| POST | `/api/extract` | `{ text?, image?, docLabel, fields }` → extracted values + confidence (NVIDIA NIM) |
+| POST | `/api/ingest` | Multipart upload → object storage + Kafka `document.received` (async processing) |
+| GET | `/api/imports?status=unapproved` | Import queue |
+| POST | `/api/imports` | Multipart upload into queue (legacy, used by bots) |
+| PATCH | `/api/imports/:id` | Approve/update a queued import (also used by Java write-back) |
+| DELETE | `/api/imports/:id` | Remove a queued import |
+| GET | `/api/imports/:id/image` | Stored document image |
+| POST | `/api/mirror` | Push an already-processed item into the queue verbatim (no re-OCR) — used by `mirror.mjs` |
 
-# 3. Simulate a WhatsApp/Telegram document landing in the inbox:
-curl -F "file=@pdfs/Gate_Inward-GT-102.pdf" http://localhost:4001/api/ingest
-```
+Upload cap: 12 MB local / ~4 MB on Vercel (Hobby body limit).
 
-Watch the Java service logs for the full trace:
+---
 
-```
-DocumentReceived → ProcessingStarted → OCRStarted/OCRCompleted
-→ Classified as gateInward → ExtractionStarted/ExtractionCompleted
-→ PersistenceCompleted → Publish document.processed → Writing back to RWMS queue
-```
+## Deploy on Vercel
 
-Verify the document landed in Postgres and the queue item was back-filled:
+The repo is set up for serverless deployment (framework: Vite, root dir `wms-app/wms-app`).
+
+1. Import `github.com/Kulkarni-Yash/WMS` in the Vercel dashboard.
+2. Set **Root Directory** to `wms-app/wms-app`.
+3. Add the production env vars (same names as the local `.env`):
+   `GOOGLE_VISION_API_KEY`, `NVIDIA_API_KEY`, `NVIDIA_MODEL`,
+   `NVIDIA_API_KEY_FALLBACK`, `NVIDIA_MODEL_FALLBACK`,
+   `NVIDIA_API_KEY_FALLBACK2`, `NVIDIA_MODEL_FALLBACK2`, `TELEGRAM_BOT_TOKEN`.
+4. Deploy.
+
+Or from the CLI:
 
 ```bash
-docker compose exec postgres psql -U rwms -c "SELECT document_id, status, retry_count, result_json FROM document_processing ORDER BY id;"
-curl -s "http://localhost:4001/api/imports?status=unapproved" | jq '.[] | select(.id=="imp-XXX")'
+vercel login
+vercel link          # links to kulkarni619y-7518/wms-app
+vercel env add <NAME> production   # for each key
+vercel --prod
 ```
 
-### Concurrency burst (4 docs, overlapping delivery)
+`api/index.js` serves all `/api/*` routes as a serverless function (see
+`vercel.json`). No external DB: the import queue lives in `/tmp` on Vercel
+(cleared on cold start) and in `server/data/pending.json` locally.
 
-```bash
-cd server
-npm run burst    # node kafka/burst.mjs  (publishes 4 DocumentReceived events)
-```
-
-The `document.received` topic has 3 partitions and the listener runs 3
-concurrent consumers, so the four documents are processed in parallel and each
-lands as exactly one `COMPLETED` row. Run it twice: the re-published documents
-are skipped by the idempotency guard (no duplicate rows).
-
-### Show processed docs on the live Vercel site (mirror)
-
-The deployed ImportPage reads the Vercel function's own /tmp queue, so locally
-processed documents are not visible there by default. A tiny mirror script
-pushes locally `COMPLETED` items up to `POST /api/mirror` on the deployed API
-(which stores them verbatim, no re-OCR). Idempotent: the route replaces an
-item by its id, so restarts/replays are harmless.
-
-```bash
-# 1. Start the pipeline (as above). The Java container fetches documents from
-#    MinIO via the presigned URL in the event, so Node must emit minio-hosted URLs:
-cd server
-S3_PUBLIC_ENDPOINT=http://minio:9000 npm start
-
-# 2. In another terminal, watch the local queue and mirror completed items up:
-cd server
-npm run mirror    # node kafka/mirror.mjs  (TARGET defaults to wms-app-orpin.vercel.app)
-```
-
-### Limitations
-
-- The Java service reuses the Node OCR/LLM endpoints over HTTP (`app.node-api-url`),
-  so the keys stay in one place (local `server/.env` / Vercel, never in the repo).
-- The durable outbox on the Node side retries Kafka failures every 5s until the
-  broker is reachable — the queue item is always created first.
-- Vercel's serverless function keeps the synchronous flow only (no Kafka/MinIO
-  bundled); the event-driven path is for the local/compose stack.
-- The Vercel queue lives in serverless /tmp — mirrored items vanish when the
-  function cold-starts. Fine for a prototype; a durable queue would need
-  external Postgres (e.g. Supabase).
-- Without `S3_PUBLIC_ENDPOINT=http://minio:9000`, events carry localhost URLs
-  that the Java container can't reach; keep that env on the Node process during
-  compose runs only (non-docker local runs leave it unset).
-- `data/pending.json` and `server/.env` are intentionally untracked.
+---
 
 ## Features
 
@@ -222,23 +270,25 @@ npm run mirror    # node kafka/mirror.mjs  (TARGET defaults to wms-app-orpin.ver
 - **Masters, Billing, Invoice, Payment, Labour/MHE attendance, Reports, Dashboard, Recycle Bin** with localStorage persistence.
 - **Import sources**: API upload + WhatsApp/Telegram bots pushing into the unapproved queue.
 
+---
+
 ## Structure
 
 ```
 wms-app/wms-app/
-├── api/index.js          # Vercel serverless Express app (OCR + queue + extract)
+├── api/index.js          # Vercel serverless Express app (OCR + queue + extract + mirror)
 ├── server/               # Local OCR microservice
-│   ├── index.js          #   HTTP routes, bot bootstrap, ingest router
+│   ├── index.js          #   HTTP routes, bot bootstrap, ingest router, outbox flusher
 │   ├── ingest.js         #   POST /api/ingest (object storage + Kafka + outbox)
 │   ├── storage.js        #   S3-compatible/MinIO store + presigned URLs
-│   ├── kafka/            #   producer.js (document.received), outbox.js, burst.mjs
+│   ├── kafka/            #   producer.js, outbox.js, burst.mjs, mirror.mjs
 │   ├── ocr.js            #   MuPDF text sync + Google Vision OCR
 │   ├── extract.js        #   NVIDIA NIM field extraction (vision + text, fallbacks)
 │   ├── preprocess.js     #   sharp crop/normalise before OCR
 │   ├── store.js          #   pending.json queue (data/pending.json, /tmp on Vercel)
 │   ├── telegram/         #   Telegram bot (watches for documents)
 │   ├── whatsapp/         #   WhatsApp bot
-│   └── data/pending.json #   seeded import queue
+│   └── data/pending.json #   seeded import queue (git-ignored)
 ├── services/document-processing-service/   # Java 21 + Spring WebFlux + Kafka + R2DBC
 │   ├── Dockerfile
 │   └── src/main/java/com/rwms/docproc/
@@ -246,7 +296,7 @@ wms-app/wms-app/
 │       ├── event/        #   Domain events (received/processed/failed)
 │       ├── pipeline/     #   Reactor pipeline, context, retries, exceptions
 │       ├── classify/     #   In-JVM document classifier (17 types)
-│       ├── clients/      #   WebClient: OCR, NVIDIA extract, queue write-back
+│       ├── clients/      #   WebClient: OCR, NVIDIA extract, retrieval, queue write-back
 │       ├── repository/   #   R2DBC persistence + idempotency guard
 │       ├── persistence/  #   Startup schema init
 │       └── validation/   #   Extraction sanity checks
@@ -260,16 +310,27 @@ wms-app/wms-app/
 └── vite.config.js        # /api → localhost:4001 dev proxy
 ```
 
+---
+
 ## Commands
 
 ```bash
-npm run dev       # Vite dev server
+# Frontend (repo root: wms-app/wms-app)
+npm run dev       # Vite dev server (port 5173)
 npm run build     # production build
 npm run lint      # oxlint
 npm run preview   # preview the built app
 
-# server/
-npm run burst     # publish 4 DocumentReceived events for a Kafka concurrency demo
-npm run telegram  # Telegram bot
-npm run bot       # WhatsApp bot
+# OCR pipeline (server/)
+npm start                 # Express API + Telegram bot (port 4001)
+npm run dev               # same, with file-watch reload
+npm run telegram          # Telegram bot explicitly
+npm run telegram:simulate # push a fake Telegram doc into the queue
+npm run bot               # WhatsApp bot (Phase 2 stub)
+npm run bot:simulate      # one-shot simulated WhatsApp push
+npm run burst             # publish 4 DocumentReceived events (Kafka concurrency demo)
+npm run mirror            # push local COMPLETED items to the live Vercel queue
+
+# Full stack
+docker compose up --build # Kafka + Postgres + MinIO + Java worker
 ```
