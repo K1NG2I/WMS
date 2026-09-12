@@ -260,6 +260,7 @@ function ProgressBar({ value }) {
 // (Telegram). Everything is driven by props so both call sites look identical.
 function ReviewPanel({
   fileName,
+  pendingId,
   fullText,
   pages = [],
   detected,
@@ -274,7 +275,6 @@ function ReviewPanel({
   linkCandidates = [],
   tone,
   extracting = false,
-  progress = 0,
   onChangeDocType,
   onSetValue,
   onClear,
@@ -286,6 +286,10 @@ function ReviewPanel({
   onClose,
   hideRemove = false,
 }) {
+  // Each mounted ReviewPanel drives its OWN animated progress while the LLM
+  // extraction for THIS document is in flight, so multiple open reviews never
+  // interfere with each other's progress bar.
+  const progress = useFakeProgress(extracting ? (pendingId || fileName || "review") : "");
   return (
     <div className="rounded-md border overflow-hidden" style={{ borderColor: C.border, background: C.card }}>
       {extracting && (
@@ -505,7 +509,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
   const [expandedId, setExpandedId] = useState(null);
   const [pendingItems, setPendingItems] = useState([]);
   const [pendingLoading, setPendingLoading] = useState(false);
-  const [review, setReview] = useState(null);
+  const [reviews, setReviews] = useState([]);
   const inputRef = useRef(null);
 
   const fetchPending = async () => {
@@ -523,23 +527,27 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
   }, []);
 
   const openPendingReview = (p) => {
+    if (reviews.some((r) => r.pendingId === p.id)) return; // already open
     const ranks = detectDocType(p.fullText || "");
     const fields = fieldsByLabel[ranks[0]?.label] || [];
-    setReview({
-      pendingId: p.id,
-      fileName: p.fileName,
-      fullText: p.fullText || "",
-      pages: p.pages || [],
-      detected: ranks[0],
-      alternatives: ranks.slice(0, 4),
-      docKey: ranks[0]?.key || "",
-      fields,
-      values: {},
-      confidence: {},
-      parentLink: defaultLinkFor(ranks[0] || null),
-      extracting: true,
-      image: null,
-    });
+    setReviews((prev) => [
+      ...prev,
+      {
+        pendingId: p.id,
+        fileName: p.fileName,
+        fullText: p.fullText || "",
+        pages: p.pages || [],
+        detected: ranks[0],
+        alternatives: ranks.slice(0, 4),
+        docKey: ranks[0]?.key || "",
+        fields,
+        values: {},
+        confidence: {},
+        parentLink: defaultLinkFor(ranks[0] || null),
+        extracting: true,
+        image: null,
+      },
+    ]);
     // Pre-fill with the LLM without blocking the UI — the progress bar in the
     // ReviewPanel shows once it is done. For photos, first pull the stored
     // document image and let the vision model read it directly (OCR text on a
@@ -556,107 +564,117 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
         } catch {}
       }
       const ex = await extractFieldsSmart(p.fullText || "", ranks[0]?.label, fields, image);
-      setReview((prev) =>
-        prev && prev.pendingId === p.id
-          ? {
-              ...prev,
-              values: { ...(ex.values || {}) },
-              confidence: ex.confidence || {},
-              extracting: false,
-              image,
-            }
-          : prev,
+      // Only update this review; other open reviews keep their own state.
+      setReviews((prev) =>
+        prev.map((r) =>
+          r.pendingId === p.id
+            ? {
+                ...r,
+                values: { ...(ex.values || {}) },
+                confidence: ex.confidence || {},
+                extracting: false,
+                image,
+              }
+            : r,
+        ),
       );
     })();
   };
 
-  const cancelReview = () => setReview(null);
+  const patchReview = (id, updater) =>
+    setReviews((prev) =>
+      prev.map((r) =>
+        r.pendingId === id ? (typeof updater === "function" ? updater(r) : { ...r, ...updater }) : r,
+      ),
+    );
 
-  const saveReview = () => {
-    if (!review || !reviewDoc) return;
-    const link = reviewLinkCandidates.some((o) => o.rootId === review.parentLink)
-      ? review.parentLink
+  const cancelReview = (id) => setReviews((prev) => prev.filter((r) => r.pendingId !== id));
+
+  const saveReview = (id) => {
+    const target = reviews.find((r) => r.pendingId === id);
+    if (!target) return;
+    const tDoc = DOC_TYPES.find((d) => d.key === target.docKey);
+    if (!tDoc) return;
+    const tShowLink = isWorkflowDoc(tDoc) && (tDoc.stageIndex || 0) > 0;
+    const tLinkCandidates = tShowLink ? (linkOptions[tDoc.flow] || []) : [];
+    const link = tLinkCandidates.some((o) => o.rootId === target.parentLink)
+      ? target.parentLink
       : "";
-    onSaveDirect(reviewDoc, review.values, link);
-    if (review.pendingId) {
-      fetch(`/api/imports/${review.pendingId}`, {
+    onSaveDirect(tDoc, target.values, link);
+    if (target.pendingId) {
+      fetch(`/api/imports/${target.pendingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "approved" }),
       }).catch(() => {});
     }
-    setPendingItems((prev) => prev.filter((p) => p.id !== review.pendingId));
-    setReview(null);
+    setPendingItems((prev) => prev.filter((p) => p.id !== target.pendingId));
+    cancelReview(id);
   };
 
-  const changeReviewDocType = (key) => {
+  const changeReviewDocType = (key, id) => {
     const doc = DOC_TYPES.find((d) => d.key === key);
-    if (!doc || !review) return;
+    const target = reviews.find((r) => r.pendingId === id);
+    if (!doc || !target) return;
     const newFields = fieldsByLabel[doc.label] || [];
-    const extraction = extractFieldValues(review.fullText || "", newFields);
+    const extraction = extractFieldValues(target.fullText || "", newFields);
     const values = { ...extraction.values };
     // Preserve any manual edits for fields that still exist in the new type.
     newFields.forEach((f) => {
       if (
-        review.values[f.key] !== undefined &&
-        review.values[f.key] !== null &&
-        review.values[f.key] !== ""
+        target.values[f.key] !== undefined &&
+        target.values[f.key] !== null &&
+        target.values[f.key] !== ""
       ) {
-        values[f.key] = review.values[f.key];
+        values[f.key] = target.values[f.key];
       }
     });
-    setReview((prev) =>
-      prev && {
-        ...prev,
-        docKey: key,
-        fields: newFields,
-        values,
-        confidence: extraction.confidence,
-        parentLink: defaultLinkFor(doc),
-        extracting: !!prev.image,
-      },
-    );
+    patchReview(id, {
+      docKey: key,
+      fields: newFields,
+      values,
+      confidence: extraction.confidence,
+      parentLink: defaultLinkFor(doc),
+      extracting: !!target.image,
+    });
     // A photo's OCR text is unreliable; when a document image is stored,
     // re-run extraction against the vision model so changing the doc type
     // triggers a proper re-scan instead of re-reading garble.
-    if (review.image) {
-      extractFieldsSmart(review.fullText || "", doc.label, newFields, review.image).then((ex) => {
-        setReview((prev) =>
-          prev && prev.docKey === key
+    if (target.image) {
+      extractFieldsSmart(target.fullText || "", doc.label, newFields, target.image).then((ex) => {
+        patchReview(id, (r) =>
+          r.docKey === key
             ? {
-                ...prev,
+                ...r,
                 values: { ...(ex.values || {}) },
                 confidence: ex.confidence || {},
                 extracting: false,
               }
-            : prev,
+            : r,
         );
       });
     }
   };
 
-  const clearReview = () => {
-    if (!review) return;
-    const extraction = extractFieldValues(review.fullText || "", review.fields || []);
-    setReview((prev) =>
-      prev && {
-        ...prev,
-        values: { ...extraction.values },
-        confidence: extraction.confidence,
-      },
-    );
+  const clearReview = (id) => {
+    const target = reviews.find((r) => r.pendingId === id);
+    if (!target) return;
+    const extraction = extractFieldValues(target.fullText || "", target.fields || []);
+    patchReview(id, {
+      values: { ...extraction.values },
+      confidence: extraction.confidence,
+    });
   };
 
-  const setReviewValue = (key, value) =>
-    setReview((prev) => prev && { ...prev, values: { ...prev.values, [key]: value } });
+  const setReviewValue = (key, value, id) =>
+    patchReview(id, (r) => ({ ...r, values: { ...r.values, [key]: value } }));
 
-  const setReviewParentLink = (value) =>
-    setReview((prev) => prev && { ...prev, parentLink: value });
+  const setReviewParentLink = (value, id) => patchReview(id, { parentLink: value });
 
   const rejectPending = async (id) => {
     fetch(`/api/imports/${id}`, { method: "DELETE" }).catch(() => {});
     setPendingItems((prev) => prev.filter((p) => p.id !== id));
-    setReview((prev) => (prev && prev.pendingId === id ? null : prev));
+    setReviews((prev) => prev.filter((r) => r.pendingId !== id));
   };
 
   const patch = (id, partial) =>
@@ -824,17 +842,6 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
   const linkCandidates = showLink ? (linkOptions[selectedDoc.flow] || []) : [];
   const setParentLink = (value) => patch(active.id, { parentLink: value });
 
-  // Derived state for the inline For Approval review (Telegram items).
-  const reviewDoc = review ? DOC_TYPES.find((d) => d.key === review.docKey) : null;
-  const reviewFields = reviewDoc ? fieldsByLabel[reviewDoc.label] || [] : [];
-  const reviewTone = reviewDoc ? TONE_COLORS[reviewDoc.tone] : "#334155";
-  const reviewShowLink =
-    reviewDoc && isWorkflowDoc(reviewDoc) && (reviewDoc.stageIndex || 0) > 0;
-  const reviewLinkCandidates = reviewShowLink ? (linkOptions[reviewDoc.flow] || []) : [];
-  const reviewProgress = useFakeProgress(
-    review && review.extracting ? `rev:${review.pendingId}` : "",
-  );
-
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-start justify-between flex-wrap gap-3">
@@ -888,7 +895,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
       </div>
 
       {/* For Approval — Telegram / WhatsApp / external queue */}
-      {(pendingItems.length > 0 || review) && (
+      {(pendingItems.length > 0 || reviews.length > 0) && (
         <div className="rounded-md border overflow-hidden" style={{ borderColor: C.border, background: C.card }}>
           <div className="px-4 py-3 flex items-center justify-between" style={{ background: "#FFF8ED", borderBottom: `1px solid ${C.border}` }}>
             <div className="flex items-center gap-2">
@@ -903,7 +910,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
                 className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
                 style={{ background: "#C2790A1A", color: "#C2790A" }}
               >
-                {pendingItems.filter((p) => !review || p.id !== review.pendingId).length}
+                {pendingItems.filter((p) => !reviews.some((r) => r.pendingId === p.id)).length}
               </span>
             </div>
             <button
@@ -916,7 +923,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
           </div>
           <div className="flex flex-col gap-0">
             {pendingItems
-              .filter((pi) => !review || pi.id !== review.pendingId)
+              .filter((pi) => !reviews.some((r) => r.pendingId === pi.id))
               .map((pi) => {
                 const detected = detectDocType(pi.fullText || "");
                 const doc = detected.length ? DOC_TYPES.find((d) => d.key === detected[0].key) : null;
@@ -971,50 +978,59 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
                 );
               })}
 
-            {review && (
-              <ReviewPanel
-                fileName={review.fileName}
-                fullText={review.fullText}
-                pages={review.pages || []}
-                detected={review.detected}
-                alternatives={review.alternatives || []}
-                docKey={review.docKey}
-                selectedDoc={reviewDoc}
-                selectedFields={reviewFields}
-                values={review.values}
-                confidence={review.confidence}
-                parentLink={review.parentLink}
-                showLink={reviewShowLink}
-                linkCandidates={reviewLinkCandidates}
-                tone={reviewTone}
-                extracting={review.extracting}
-                progress={reviewProgress}
-                onChangeDocType={changeReviewDocType}
-                onSetValue={setReviewValue}
-                onClear={clearReview}
-                onRemove={cancelReview}
-                hideRemove
-                onClose={cancelReview}
-                onSetParentLink={setReviewParentLink}
-                onDownloadPdf={() =>
-                  reviewDoc &&
-                  downloadFormPdf({
-                    title: reviewDoc.label,
-                    tone: reviewTone,
-                    docId: review.values[reviewFields[0]?.key] || "IMPORT",
-                    fields: reviewFields,
-                    values: review.values,
-                    meta: { Source: review.fileName, Status: "Imported" },
-                    onGenerated: (blob, args) => onCachePdf && onCachePdf(blob, args),
-                  })
-                }
-                onSave={saveReview}
-                onOpenForm={() => {
-                  if (!reviewDoc) return;
-                  onOpenForm(reviewDoc, review.values, review.parentLink || "");
-                }}
-              />
-            )}
+            {reviews.map((r) => {
+              const rDoc = DOC_TYPES.find((d) => d.key === r.docKey) || null;
+              const rFields = rDoc ? fieldsByLabel[rDoc.label] || [] : [];
+              const rTone = rDoc ? TONE_COLORS[rDoc.tone] : "#334155";
+              const rShowLink =
+                rDoc && isWorkflowDoc(rDoc) && (rDoc.stageIndex || 0) > 0;
+              const rLinkCandidates = rShowLink ? (linkOptions[rDoc.flow] || []) : [];
+              return (
+                <ReviewPanel
+                  key={r.pendingId}
+                  pendingId={r.pendingId}
+                  fileName={r.fileName}
+                  fullText={r.fullText}
+                  pages={r.pages || []}
+                  detected={r.detected}
+                  alternatives={r.alternatives || []}
+                  docKey={r.docKey}
+                  selectedDoc={rDoc}
+                  selectedFields={rFields}
+                  values={r.values}
+                  confidence={r.confidence}
+                  parentLink={r.parentLink}
+                  showLink={rShowLink}
+                  linkCandidates={rLinkCandidates}
+                  tone={rTone}
+                  extracting={r.extracting}
+                  onChangeDocType={(key) => changeReviewDocType(key, r.pendingId)}
+                  onSetValue={(key, value) => setReviewValue(key, value, r.pendingId)}
+                  onClear={() => clearReview(r.pendingId)}
+                  onRemove={() => cancelReview(r.pendingId)}
+                  hideRemove
+                  onClose={() => cancelReview(r.pendingId)}
+                  onSetParentLink={(value) => setReviewParentLink(value, r.pendingId)}
+                  onDownloadPdf={() =>
+                    rDoc &&
+                    downloadFormPdf({
+                      title: rDoc.label,
+                      tone: rTone,
+                      docId: r.values[rFields[0]?.key] || "IMPORT",
+                      fields: rFields,
+                      values: r.values,
+                      meta: { Source: r.fileName, Status: "Imported" },
+                      onGenerated: (blob, args) => onCachePdf && onCachePdf(blob, args),
+                    })
+                  }
+                  onSave={() => saveReview(r.pendingId)}
+                  onOpenForm={() => {
+                    if (!rDoc) return;
+                    onOpenForm(rDoc, r.values, r.parentLink || "");
+                  }}
+                />
+              );
+            })}
           </div>
         </div>
       )}
