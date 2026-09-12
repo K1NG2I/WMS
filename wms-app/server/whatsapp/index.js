@@ -6,7 +6,7 @@ import fetch from "node-fetch";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = path.join(__dirname, "config.json");
-const OCR_URL = process.env.OCR_URL || "http://localhost:4001/api/imports";
+const INGEST_URL = process.env.INGEST_URL || "http://localhost:4001/api/ingest";
 
 export async function loadConfig() {
   const raw = await fs.readFile(CONFIG_FILE, "utf8");
@@ -37,7 +37,7 @@ export async function pushPdf({ buffer, fileName, sender, group, source }) {
   if (group) form.append("group", group);
   if (source) form.append("source", source);
 
-  const res = await fetch(OCR_URL, { method: "POST", body: form });
+  const res = await fetch(INGEST_URL, { method: "POST", body: form });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.error || `OCR server responded ${res.status}`);

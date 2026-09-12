@@ -9,13 +9,17 @@
     "bot": "node whatsapp/main.js",
     "bot:simulate": "cross-env WHATSAPP_SIMULATE=1 node whatsapp/main.js",
     "telegram": "node index.js",
-    "telegram:simulate": "node telegram/simulate.js"
+    "telegram:simulate": "node telegram/simulate.js",
+    "burst": "node kafka/burst.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.722.0",
+    "@aws-sdk/s3-request-presigner": "^3.722.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "form-data": "^4.0.6",
+    "kafkajs": "^2.2.4",
     "multer": "^2.3.0",
     "mupdf": "^1.28.1",
     "node-fetch": "^3.3.2",

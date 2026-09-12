@@ -10,6 +10,9 @@ import { extractWithLLM } from "./extract.js";
 import { createItem, getItem, listItems, patchItem, removeItem } from "./store.js";
 import { preprocessImage } from "./preprocess.js";
 import { runBot, stopBot } from "./telegram/bot.js";
+import { ingestRouter } from "./ingest.js";
+import { startOutboxFlusher, stopOutboxFlusher } from "./kafka/outbox.js";
+import { disconnectProducer } from "./kafka/producer.js";
 
 const PORT = process.env.PORT || 4001;
 const MAX_SIZE = 12 * 1024 * 1024;
@@ -17,6 +20,7 @@ const MAX_SIZE = 12 * 1024 * 1024;
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
+app.use("/api", ingestRouter);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -229,6 +233,7 @@ app.post("/api/extract", async (req, res) => {
 
 const server = app.listen(PORT, "0.0.0.0", async () => {
   console.log(`wms-import-api listening on port ${PORT} (all interfaces)`);
+  startOutboxFlusher();
   try {
     await runBot();
   } catch (err) {
@@ -238,7 +243,9 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
 
 async function shutdown() {
   console.log("\nshutting down...");
+  stopOutboxFlusher();
   await stopBot();
+  await disconnectProducer();
   server.close(() => process.exit(0));
 }
 process.on("SIGINT", shutdown);

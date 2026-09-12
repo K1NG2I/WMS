@@ -1,7 +1,8 @@
+import "dotenv/config";
 import OpenAI from "openai";
 import sharp from "sharp";
 
-const KEY = "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";
+const KEY = process.env.NVIDIA_API_KEY || "";
 const MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
 
 // Build a real document-like image (the yash3.jpeg scenario)

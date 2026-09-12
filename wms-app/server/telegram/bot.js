@@ -7,7 +7,7 @@ import TelegramBot from "node-telegram-bot-api";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = path.join(__dirname, "config.json");
-const OCR_URL = process.env.OCR_URL || "http://localhost:4001/api/imports";
+const INGEST_URL = process.env.INGEST_URL || "http://localhost:4001/api/ingest";
 
 let bot = null;
 
@@ -15,7 +15,7 @@ export async function loadConfig() {
   const raw = await fs.readFile(CONFIG_FILE, "utf8");
   const cfg = JSON.parse(raw);
   return {
-    token: cfg.token || "",
+    token: process.env.TELEGRAM_BOT_TOKEN || cfg.token || "",
     allowedUserIds: Array.isArray(cfg.allowedUserIds) ? cfg.allowedUserIds : [],
   };
 }
@@ -29,7 +29,7 @@ export async function pushPdf({ buffer, fileName, sender, source, mime }) {
   if (sender) form.append("sender", sender);
   if (source) form.append("source", source);
 
-  const res = await fetch(OCR_URL, { method: "POST", body: form });
+  const res = await fetch(INGEST_URL, { method: "POST", body: form });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.error || `OCR server responded ${res.status}`);

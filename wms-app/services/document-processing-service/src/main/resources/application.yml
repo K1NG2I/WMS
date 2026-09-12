@@ -1,0 +1,40 @@
+server:
+  port: 9090
+
+spring:
+  application:
+    name: document-processing-service
+  r2dbc:
+    url: r2dbc:postgresql://localhost:5433/rwms
+    username: rwms
+    password: ${DB_PASSWORD:rwms}
+    pool:
+      max-size: 10
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: docproc
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+app:
+  kafka:
+    received-topic: document.received
+    processed-topic: document.processed
+    failed-topic: document.failed
+    partitions: 3
+    listener-concurrency: 3
+  node-api-url: http://localhost:4001
+  ocr-timeout-ms: 120000
+  queue-writeback-enabled: true
+  retrieval-timeout-ms: 30000
+
+logging:
+  level:
+    com.rwms.docproc: INFO
+    org.apache.kafka: WARN
