@@ -108,6 +108,10 @@ This works without Docker.
 
 ### 4. Optional — event-driven pipeline (Docker): Kafka + Java + Postgres + MinIO
 
+> The compose file pulls MinIO from `quay.io/minio/*` — the same images on Docker
+> Hub are no longer pullable anonymously. Requires a Docker engine (e.g. colima):
+> `brew install colima docker docker-compose && colima start`.
+
 ```bash
 # Terminal 3 — the compose stack (Kafka KRaft, Postgres 16, MinIO, Java worker)
 docker compose up --build

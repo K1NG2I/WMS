@@ -2,6 +2,7 @@ package com.rwms.docproc.validation;
 
 import com.rwms.docproc.pipeline.ProcessingException;
 import com.rwms.docproc.pipeline.ProcessContext;
+import com.rwms.docproc.util.ProcessingLog;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 

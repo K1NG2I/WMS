@@ -74,7 +74,8 @@ public class DocumentProcessingRepository {
                 .bind("startedAt", startedAt)
                 .bind("documentId", documentId)
                 .fetch()
-                .rowsUpdated();
+                .rowsUpdated()
+                .map(Long::intValue);
     }
 
     public Mono<Integer> markCompleted(String documentId, Instant completedAt, int retryCount, String resultJson) {
@@ -90,7 +91,8 @@ public class DocumentProcessingRepository {
                 .bind("resultJson", resultJson)
                 .bind("documentId", documentId)
                 .fetch()
-                .rowsUpdated();
+                .rowsUpdated()
+                .map(Long::intValue);
     }
 
     public Mono<Integer> markFailed(String documentId, Instant failedAt, int retryCount, String errorMessage,
@@ -109,6 +111,7 @@ public class DocumentProcessingRepository {
                 .bind("resultJson", resultJson)
                 .bind("documentId", documentId)
                 .fetch()
-                .rowsUpdated();
+                .rowsUpdated()
+                .map(Long::intValue);
     }
 }

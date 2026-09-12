@@ -6,11 +6,13 @@ services:
     container_name: rwms-kafka
     ports:
       - "9093:9093"
+    extra_hosts:
+      - "kafka:127.0.0.1"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9093,CONTROLLER://kafka:9094
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
@@ -43,7 +45,7 @@ services:
       retries: 30
 
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     container_name: rwms-minio
     command: server /data --console-address ":9001"
     ports:
@@ -61,7 +63,7 @@ services:
       retries: 30
 
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     container_name: rwms-minio-init
     depends_on:
       minio:

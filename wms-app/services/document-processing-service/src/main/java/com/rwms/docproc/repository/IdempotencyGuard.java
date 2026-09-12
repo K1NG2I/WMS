@@ -58,6 +58,7 @@ public class IdempotencyGuard {
         return db.sql("SELECT status FROM document_processing WHERE document_id = :id")
                 .bind("id", documentId)
                 .map((row, meta) -> row.get("status", String.class))
+                .one()
                 .map(s -> DocStatus.valueOf(s).terminal() ? DUPLICATE_TERMINAL : ALREADY_STARTED)
                 .defaultIfEmpty(ALREADY_STARTED);
     }

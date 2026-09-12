@@ -21,6 +21,17 @@ const client = new S3Client({
   credentials: { accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY },
 });
 
+// SigV4 signs the Host header, so a presigned URL can only be used against the
+// host it was signed for. Node reaches MinIO at ENDPOINT (localhost:9000), but
+// the Java container reaches it at PUBLIC_ENDPOINT (minio:9000) — build a
+// dedicated signer so the published fileLocation matches what clients fetch.
+const signClient = new S3Client({
+  region: REGION,
+  endpoint: PUBLIC_ENDPOINT,
+  forcePathStyle: true,
+  credentials: { accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY },
+});
+
 const EXT_BY_MIME = {
   "application/pdf": ".pdf",
   "image/png": ".png",
@@ -29,15 +40,6 @@ const EXT_BY_MIME = {
 
 // Rewrite a signed URL's origin so a URL created against the host-reachable
 // endpoint is usable from inside the docker network (minio:9000).
-function rewriteOrigin(url) {
-  const u = new URL(url);
-  const p = new URL(PUBLIC_ENDPOINT);
-  u.protocol = p.protocol;
-  u.host = p.host;
-  u.port = p.port;
-  return u.toString();
-}
-
 export async function storeDocument(buffer, mime) {
   const key = `${new Date().toISOString().slice(0, 10)}/${randomUUID()}${EXT_BY_MIME[mime] || ".bin"}`;
   await client.send(
@@ -49,12 +51,12 @@ export async function storeDocument(buffer, mime) {
     })
   );
   const signed = await getSignedUrl(
-    client,
+    signClient,
     new GetObjectCommand({ Bucket: BUCKET, Key: key }),
     { expiresIn: 3600 }
   );
   return {
     storageKey: key,
-    fileLocation: rewriteOrigin(signed),
+    fileLocation: signed,
   };
 }

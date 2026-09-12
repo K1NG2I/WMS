@@ -50,6 +50,12 @@ public class RwmsQueueClient {
         } catch (java.io.IOException e) {
             body.put("pages", "[]");
         }
+        // Top-level extraction fields match the shape the Node/React queue
+        // already understands (same keys as the synchronous OCR path).
+        body.put("docKey", ctx.docKey());
+        body.put("docLabel", ctx.docLabel());
+        body.set("values", mapper.valueToTree(ctx.extractedValues()));
+        body.set("confidence", mapper.valueToTree(ctx.confidence()));
         body.set("extracted", extracted);
         body.set("processing", processing);
 

@@ -28,8 +28,7 @@ public class DocumentReceivedListener {
     }
 
     @KafkaListener(topics = "${app.kafka.received-topic}",
-            concurrency = "${app.kafka.listener-concurrency}",
-            ackMode = "MANUAL_IMMEDIATE")
+            concurrency = "${app.kafka.listener-concurrency}")
     public void onDocumentReceived(ConsumerRecord<String, String> record, Acknowledgment ack) {
         DocumentReceivedEvent event;
         try {

@@ -19,6 +19,7 @@ public class ProcessContext {
     private String fullText;
     private String pagesJson;
     private List<FieldSpec> fields;
+    private String docKey;
     private String docLabel;
     private java.util.Map<String, String> extractedValues;
     private java.util.Map<String, Integer> confidence;
@@ -91,11 +92,16 @@ public class ProcessContext {
         return fields;
     }
 
+    public String docKey() {
+        return docKey;
+    }
+
     public String docLabel() {
         return docLabel;
     }
 
-    public ProcessContext withClassification(String docLabel, List<FieldSpec> fields) {
+    public ProcessContext withClassification(String docKey, String docLabel, List<FieldSpec> fields) {
+        this.docKey = docKey;
         this.docLabel = docLabel;
         this.fields = fields;
         return this;

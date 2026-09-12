@@ -116,7 +116,7 @@ public class DocumentProcessingPipeline {
     private ProcessContext classify(ProcessContext ctx) {
         DocumentClassifier.ClassifierResult result = classifier.classify(ctx.fullText());
         ProcessingLog.log(ctx, "Classified as " + result.typeKey() + " (" + result.label() + ")");
-        return ctx.withClassification(result.label(), result.fields())
+        return ctx.withClassification(result.typeKey(), result.label(), result.fields())
                 .withStatus(DocStatus.OCR_COMPLETED);
     }
 
@@ -132,6 +132,13 @@ public class DocumentProcessingPipeline {
         ctx.markFailed();
         ProcessingLog.error(ctx.documentId(), ctx.eventId(),
                 "Pipeline terminated: " + e.getMessage(), e);
+        Throwable c = e;
+        int depth = 0;
+        while (c != null && depth < 12) {
+            System.err.println("[cause " + depth + "] " + c.getClass().getName() + ": " + c.getMessage());
+            c = c.getCause();
+            depth++;
+        }
         return repo.markFailed(ctx.documentId(), ctx.completedAt(), ctx.retryCount(),
                         truncate(e.getMessage()), failureJson(ctx, e))
                 .then(publisher.publishFailed(ctx, e))
@@ -148,7 +155,7 @@ public class DocumentProcessingPipeline {
         return Retry.backoff(MAX_ATTEMPTS - 1, Duration.ofMillis(400))
                 .maxBackoff(Duration.ofSeconds(3))
                 .filter(t -> t instanceof ProcessingException pe && pe.transientFailure())
-                .doOnRetry(sig -> {
+                .doBeforeRetry(sig -> {
                     ctx.bumpRetry();
                     ProcessingLog.log(ctx, "Transient failure, retrying #" + sig.totalRetries()
                             + " — " + (sig.failure() == null ? "" : sig.failure().getMessage()));

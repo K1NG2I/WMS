@@ -22,6 +22,9 @@ public class HttpClients {
                        @Value("${app.ocr-timeout-ms}") long ocrTimeoutMs) {
         this.nodeClient = build(nodeApiUrl, Duration.ofMillis(ocrTimeoutMs));
         this.retrievalClient = WebClient.builder()
+                // Stored documents can be a few MB; the default 256 KiB
+                // in-memory buffer would abort the body read.
+                .codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
                 .clientConnector(connector(Duration.ofSeconds(30)))
                 .build();
     }
@@ -39,6 +42,7 @@ public class HttpClients {
     static WebClient build(String baseUrl, Duration timeout) {
         return WebClient.builder()
                 .baseUrl(baseUrl)
+                .codecs(codecs -> codecs.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
                 .clientConnector(connector(timeout))
                 .build();
     }
