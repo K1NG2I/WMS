@@ -122,6 +122,29 @@ app.get("/api/imports/:id/image", async (req, res) => {
   }
 });
 
+// Mirrors an ALREADY-PROCESSED item from the local Kafka/Java pipeline into this
+// queue verbatim so the deployed ImportPage shows the same document. No OCR runs
+// here — the local pipeline did the work and ships fullText/pages/extracted.
+app.post("/api/mirror", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const id = body.id;
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({ error: "Mirror requires an item with an id." });
+    }
+    if (typeof body.fileName !== "string" && typeof body.fullText !== "string") {
+      return res.status(400).json({ error: "Mirror requires fileName or fullText." });
+    }
+    const existing = await getItem(id);
+    const { storageKey, fileLocation, ...safe } = body;
+    const item = existing ? await patchItem(id, safe) : await createItem(safe);
+    return res.status(existing ? 200 : 201).json(item);
+  } catch (err) {
+    console.error("[imports] mirror error:", err);
+    return res.status(500).json({ error: err.message || "Mirror failed." });
+  }
+});
+
 app.post("/api/import/ocr", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {

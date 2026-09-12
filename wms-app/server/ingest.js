@@ -1,10 +1,10 @@
 import { Router } from "express";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
-import { storeDocument } from "../storage.js";
-import { createItem } from "../store.js";
-import { publishDocumentReceived } from "../kafka/producer.js";
-import { enqueuePublish } from "../kafka/outbox.js";
+import { storeDocument } from "./storage.js";
+import { createItem } from "./store.js";
+import { publishDocumentReceived } from "./kafka/producer.js";
+import { enqueuePublish } from "./kafka/outbox.js";
 
 // POST /api/ingest
 // Event-driven ingestion: store the raw document (object storage + queue item),

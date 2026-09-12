@@ -167,6 +167,16 @@ export async function runBot() {
 
   bot.on("polling_error", (err) => {
     console.error("[telegram] polling error:", err.message);
+    // node-telegram-bot-api stops polling permanently on EFATAL; bring it back
+    // with a short backoff so transient network failures self-resolve.
+    if (err.message && err.message.includes("EFATAL")) {
+      console.error("[telegram] EFATAL - restarting polling in 5s...");
+      setTimeout(() => {
+        bot.startPolling({ restart: true }).catch((e) => {
+          console.error("[telegram] polling restart failed:", e.message);
+        });
+      }, 5000);
+    }
   });
 }
 

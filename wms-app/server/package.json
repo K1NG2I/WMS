@@ -10,7 +10,8 @@
     "bot:simulate": "cross-env WHATSAPP_SIMULATE=1 node whatsapp/main.js",
     "telegram": "node index.js",
     "telegram:simulate": "node telegram/simulate.js",
-    "burst": "node kafka/burst.mjs"
+    "burst": "node kafka/burst.mjs",
+    "mirror": "node kafka/mirror.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.722.0",

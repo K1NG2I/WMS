@@ -179,6 +179,25 @@ concurrent consumers, so the four documents are processed in parallel and each
 lands as exactly one `COMPLETED` row. Run it twice: the re-published documents
 are skipped by the idempotency guard (no duplicate rows).
 
+### Show processed docs on the live Vercel site (mirror)
+
+The deployed ImportPage reads the Vercel function's own /tmp queue, so locally
+processed documents are not visible there by default. A tiny mirror script
+pushes locally `COMPLETED` items up to `POST /api/mirror` on the deployed API
+(which stores them verbatim, no re-OCR). Idempotent: the route replaces an
+item by its id, so restarts/replays are harmless.
+
+```bash
+# 1. Start the pipeline (as above). The Java container fetches documents from
+#    MinIO via the presigned URL in the event, so Node must emit minio-hosted URLs:
+cd server
+S3_PUBLIC_ENDPOINT=http://minio:9000 npm start
+
+# 2. In another terminal, watch the local queue and mirror completed items up:
+cd server
+npm run mirror    # node kafka/mirror.mjs  (TARGET defaults to wms-app-orpin.vercel.app)
+```
+
 ### Limitations
 
 - The Java service reuses the Node OCR/LLM endpoints over HTTP (`app.node-api-url`),
@@ -187,6 +206,12 @@ are skipped by the idempotency guard (no duplicate rows).
   broker is reachable — the queue item is always created first.
 - Vercel's serverless function keeps the synchronous flow only (no Kafka/MinIO
   bundled); the event-driven path is for the local/compose stack.
+- The Vercel queue lives in serverless /tmp — mirrored items vanish when the
+  function cold-starts. Fine for a prototype; a durable queue would need
+  external Postgres (e.g. Supabase).
+- Without `S3_PUBLIC_ENDPOINT=http://minio:9000`, events carry localhost URLs
+  that the Java container can't reach; keep that env on the Node process during
+  compose runs only (non-docker local runs leave it unset).
 - `data/pending.json` and `server/.env` are intentionally untracked.
 
 ## Features
