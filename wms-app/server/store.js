@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "data");
+// Serverless environments (Vercel) only allow writes to /tmp; the committed
+// data/pending.json stays a read-only seed there. Local runs keep the file.
+const DATA_DIR = process.env.VERCEL ? "/tmp/wms-pending" : path.join(__dirname, "data");
 const FILE = path.join(DATA_DIR, "pending.json");
 
 let cache = null;
