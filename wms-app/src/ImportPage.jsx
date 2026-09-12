@@ -31,7 +31,10 @@ import { downloadFormPdf } from "./lib/pdf.js";
 // the request hits the vision-capable nano-omni model which reads the doc
 // straight off the image — the source of truth for tilted photo scans.
 async function extractFieldsSmart(text, docLabel, fields, image) {
-  const fallback = () => extractFieldValues(text || "", fields || []);
+  const fallback = () => {
+    const r = extractFieldValues(text || "", fields || []);
+    return { ...r, usingFallback: true };
+  };
   if ((!text && !image) || !fields || !fields.length) return fallback();
   try {
     const res = await fetch("/api/extract", {
@@ -46,7 +49,7 @@ async function extractFieldsSmart(text, docLabel, fields, image) {
     });
     if (!res.ok) return fallback();
     const data = await res.json();
-    return { values: data.values || {}, confidence: data.confidence || {} };
+    return { values: data.values || {}, confidence: data.confidence || {}, usingFallback: false };
   } catch {
     return fallback();
   }
@@ -297,6 +300,9 @@ function ReviewPanel({
   linkCandidates = [],
   tone,
   extracting = false,
+  aiUnavailable = false,
+  reExtracting = false,
+  onReExtract,
   onChangeDocType,
   onSetValue,
   onClear,
@@ -329,6 +335,18 @@ function ReviewPanel({
         </div>
       )}
 
+      {aiUnavailable && !extracting && !reExtracting && (
+        <div
+          className="px-4 py-2 flex items-center gap-2"
+          style={{ background: "#FFF7ED", borderBottom: `1px solid ${C.border}` }}
+        >
+          <AlertTriangle size={12} style={{ color: "#C2790A" }} />
+          <span className="text-[11px]" style={{ color: "#9A6700" }}>
+            AI extraction unavailable — showing local rule-based values.
+          </span>
+        </div>
+      )}
+
       <div className="px-4 py-3 flex items-center justify-between" style={{ background: C.surface, borderBottom: `1px solid ${C.border}` }}>
         <div>
           <div style={{ color: C.muted }} className="text-[10px] font-semibold uppercase tracking-wider">
@@ -349,6 +367,18 @@ function ReviewPanel({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {onReExtract && (
+            <button
+              onClick={onReExtract}
+              disabled={reExtracting || extracting}
+              style={{ color: C.primary, borderColor: C.border }}
+              className="px-2.5 py-1.5 rounded-md border text-[11px] font-medium flex items-center gap-1 hover:bg-blue-50 disabled:opacity-50"
+              title="Re-run NVIDIA extraction for this document"
+            >
+              {reExtracting ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+              Re-extract with AI
+            </button>
+          )}
           <button
             onClick={onClear}
             style={{ color: C.muted, borderColor: C.border }}
@@ -551,9 +581,8 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
   const openPendingReview = (p) => {
     if (reviews.some((r) => r.pendingId === p.id)) return; // already open
     const ranks = detectDocType(p.fullText || "");
-    // Prefer a finished extraction: Java write-backs come with top-level
-    // docKey/values/confidence, and the browser remembers the last reviewed
-    // state, so re-opening never re-hits the OCR bot.
+    // Re-open fast from the browser cache; the FIRST open always runs the
+    // NVIDIA bot (visible progress) even when Java already back-filled values.
     const cached = loadCachedReview(p.id);
     const backfilled =
       p.docKey &&
@@ -567,7 +596,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
       (primed && DOC_TYPES.find((d) => d.key === primed.docKey)) || ranks[0] || null;
     const docKey = detectedDoc ? detectedDoc.key : "";
     const fields = fieldsByLabel[detectedDoc?.label] || [];
-    const extracting = !primed;
+    const extracting = !cached; // cached = user already reviewed → no bot call
     setReviews((prev) => [
       ...prev,
       {
@@ -584,10 +613,13 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
         parentLink: defaultLinkFor(detectedDoc),
         extracting,
         image: null,
+        mime: p.mime || "",
+        aiUnavailable: false,
+        reExtracting: false,
       },
     ]);
     if (!extracting) return;
-    // Pre-fill with the LLM without blocking the UI — the progress bar in the
+    // Run the LLM without blocking the UI — the progress bar in the
     // ReviewPanel shows once it is done. For photos, first pull the stored
     // document image and let the vision model read it directly (OCR text on a
     // tilted photo often grabs keyboard/desktop noise instead).
@@ -612,6 +644,7 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
                 values: { ...(ex.values || {}) },
                 confidence: ex.confidence || {},
                 extracting: false,
+                aiUnavailable: !!ex.usingFallback,
                 image,
               }
             : r,
@@ -623,6 +656,36 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
         confidence: ex.confidence || {},
       });
     })();
+  };
+
+  const rerunExtract = async (id) => {
+    const target = reviews.find((r) => r.pendingId === id);
+    if (!target || target.reExtracting) return;
+    patchReview(id, { reExtracting: true });
+    let image = target.image;
+    if (!image && target.mime && target.mime.startsWith("image/")) {
+      try {
+        const res = await fetch(`/api/imports/${id}/image`);
+        if (res.ok) {
+          const data = await res.json();
+          image = data.image || null;
+        }
+      } catch {}
+    }
+    const ex = await extractFieldsSmart(
+      target.fullText || "",
+      target.detected?.label,
+      target.fields || [],
+      image,
+    );
+    patchReview(id, (r) => ({
+      ...r,
+      values: { ...(ex.values || {}) },
+      confidence: ex.confidence || {},
+      aiUnavailable: !!ex.usingFallback,
+      reExtracting: false,
+      image: image || r.image,
+    }));
   };
 
   const patchReview = (id, updater) =>
@@ -1058,6 +1121,9 @@ export default function ImportPage({ fieldsByLabel = {}, linkOptions = {}, onOpe
                   linkCandidates={rLinkCandidates}
                   tone={rTone}
                   extracting={r.extracting}
+                  aiUnavailable={r.aiUnavailable}
+                  reExtracting={r.reExtracting}
+                  onReExtract={() => rerunExtract(r.pendingId)}
                   onChangeDocType={(key) => changeReviewDocType(key, r.pendingId)}
                   onSetValue={(key, value) => setReviewValue(key, value, r.pendingId)}
                   onClear={() => clearReview(r.pendingId)}

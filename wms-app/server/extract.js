@@ -1,10 +1,40 @@
 import OpenAI from "openai";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const TIMEOUT_MS = 90000;
 
 const SUPER_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 const ULTRA_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
 const VISION_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning";
+
+// Source of truth for AI credentials: process.env wins, then the local
+// server/ai-keys.json (git-ignored), then built-in model defaults.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const AI_KEYS_FILE = path.join(__dirname, "ai-keys.json");
+let _aiKeys = null;
+function aiKeysJson() {
+  if (_aiKeys !== null) return _aiKeys;
+  try {
+    _aiKeys = JSON.parse(readFileSync(AI_KEYS_FILE, "utf8"));
+  } catch {
+    _aiKeys = {};
+  }
+  return _aiKeys;
+}
+
+function nvidiaConfig() {
+  const file = aiKeysJson();
+  return {
+    primaryKey: process.env.NVIDIA_API_KEY || file.NVIDIA_API_KEY || "",
+    primaryModel: process.env.NVIDIA_MODEL || file.NVIDIA_MODEL || VISION_MODEL,
+    fallbackKey: process.env.NVIDIA_API_KEY_FALLBACK || file.NVIDIA_API_KEY_FALLBACK || "",
+    fallbackModel: process.env.NVIDIA_MODEL_FALLBACK || file.NVIDIA_MODEL_FALLBACK || SUPER_MODEL,
+    fallbackKey2: process.env.NVIDIA_API_KEY_FALLBACK2 || file.NVIDIA_API_KEY_FALLBACK2 || "",
+    fallbackModel2: process.env.NVIDIA_MODEL_FALLBACK2 || file.NVIDIA_MODEL_FALLBACK2 || ULTRA_MODEL,
+  };
+}
 
 function makeClient(apiKey) {
   return new OpenAI({
@@ -195,12 +225,14 @@ function buildMessages(docLabel, fields, text, image) {
 }
 
 export async function extractWithLLM({ text, docLabel, fields, image }) {
-  const primaryKey = process.env.NVIDIA_API_KEY;
-  const primaryModel = process.env.NVIDIA_MODEL || VISION_MODEL;
-  const fallbackKey = process.env.NVIDIA_API_KEY_FALLBACK;
-  const fallbackModel = process.env.NVIDIA_MODEL_FALLBACK || SUPER_MODEL;
-  const fallbackKey2 = process.env.NVIDIA_API_KEY_FALLBACK2;
-  const fallbackModel2 = process.env.NVIDIA_MODEL_FALLBACK2 || ULTRA_MODEL;
+  const {
+    primaryKey,
+    primaryModel,
+    fallbackKey,
+    fallbackModel,
+    fallbackKey2,
+    fallbackModel2,
+  } = nvidiaConfig();
 
   if (!primaryKey && !fallbackKey && !fallbackKey2) {
     throw new Error("No NVIDIA API key configured.");
