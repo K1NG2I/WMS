@@ -13,11 +13,22 @@ const POLL_MS = Number(process.env.MIRROR_POLL_MS || 5000);
 
 const mirrored = new Set();
 
-async function listCompleted() {
+async function listReady() {
   const res = await fetch(`${LOCAL}/api/imports?status=unapproved`);
   if (!res.ok) throw new Error(`local queue ${res.status}`);
   const items = await res.json();
-  return items.filter((i) => i?.processing?.status === "COMPLETED" && !mirrored.has(i.id));
+  return items
+    .filter((i) => !mirrored.has(i.id))
+    .filter((i) => isReadyToMirror(i));
+}
+
+// Ready to mirror: Kafka/Java pipeline finished (COMPLETED), or the doc was
+// processed synchronously through POST /api/imports (has OCR text but no
+// pipeline marker). Items still awaiting processing (no fullText, no status)
+// are left alone.
+function isReadyToMirror(item) {
+  if (item?.processing?.status) return item.processing.status === "COMPLETED";
+  return Boolean(item?.fullText);
 }
 
 async function fetchImage(id) {
@@ -52,7 +63,7 @@ export async function mirrorItem(item) {
 
 async function tick() {
   try {
-    const items = await listCompleted();
+    const items = await listReady();
     for (const item of items) {
       try {
         const status = await mirrorItem(item);

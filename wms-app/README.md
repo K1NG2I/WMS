@@ -31,7 +31,7 @@ Warehouse Management System prototype with a PDF import pipeline (OCR + vision-b
         ▼
    ImportPage (local)  ◄── results back-filled
         ▲
-        └── mirror.mjs ◄── pushes local COMPLETED items ─► live Vercel queue
+        └── mirror.mjs ◄── pushes local processed items ─► live Vercel queue
 ```
 
 There are two processing paths:
@@ -145,7 +145,7 @@ curl -s "http://localhost:4001/api/imports?status=unapproved"
 The deployed ImportPage reads the Vercel function's own `/tmp` queue, so locally
 processed documents aren't visible there by default. `mirror.mjs` pushes
 local `COMPLETED` items up to `POST /api/mirror` (stores them verbatim, no
-re-OCR; idempotent — an item is replaced by its id):
+re-OCR; mirrors Kafka `COMPLETED` items *and* sync-OCR items with `fullText`;
 
 ```bash
 cd server
@@ -329,7 +329,7 @@ npm run telegram:simulate # push a fake Telegram doc into the queue
 npm run bot               # WhatsApp bot (Phase 2 stub)
 npm run bot:simulate      # one-shot simulated WhatsApp push
 npm run burst             # publish 4 DocumentReceived events (Kafka concurrency demo)
-npm run mirror            # push local COMPLETED items to the live Vercel queue
+npm run mirror            # push local processed items to the live Vercel queue
 
 # Full stack
 docker compose up --build # Kafka + Postgres + MinIO + Java worker
